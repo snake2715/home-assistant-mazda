@@ -46,7 +46,9 @@ class MazdaLock(MazdaEntity, LockEntity):
     def is_locked(self) -> bool | None:
         """Return true if lock is locked."""
         try:
-            return None  # Force separate buttons
+            state = self.client.get_assumed_lock_state(self.vehicle_id)
+            # Keep track of state but return None for separate buttons
+            return None
         except:
             return None
 
