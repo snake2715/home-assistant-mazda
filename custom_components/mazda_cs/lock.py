@@ -33,7 +33,7 @@ class MazdaLock(MazdaEntity, LockEntity):
     """Class for the lock."""
 
     _attr_has_entity_name = True
-    _attr_translation_key = "lock"  
+    _attr_translation_key = "lock"
 
     def __init__(self, client, coordinator, index) -> None:
         """Initialize Mazda lock."""
@@ -41,15 +41,26 @@ class MazdaLock(MazdaEntity, LockEntity):
         self._attr_unique_id = self.vin
         self._attr_is_locking = False
         self._attr_is_unlocking = False
+        self._attr_state = None
 
     @property
     def is_locked(self) -> bool | None:
         """Return true if lock is locked."""
+        return None  # Always return None for separate buttons
+
+    @property
+    def state(self) -> str:
+        """Return the state of the lock."""
+        if self._attr_is_locking:
+            return "locking"
+        if self._attr_is_unlocking:
+            return "unlocking"
+        
         try:
             self._attr_state = self.client.get_assumed_lock_state(self.vehicle_id)
-            return None
+            return "locked" if self._attr_state else "unlocked"
         except:
-            return None
+            return "locked" if self._attr_state else "unlocked"
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the vehicle doors."""
