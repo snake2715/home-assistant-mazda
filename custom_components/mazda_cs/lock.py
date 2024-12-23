@@ -33,7 +33,7 @@ class MazdaLock(MazdaEntity, LockEntity):
     """Class for the lock."""
 
     _attr_has_entity_name = True
-    _attr_translation_key = "lock"
+    _attr_translation_key = "lock"  
 
     def __init__(self, client, coordinator, index) -> None:
         """Initialize Mazda lock."""
@@ -41,22 +41,15 @@ class MazdaLock(MazdaEntity, LockEntity):
         self._attr_unique_id = self.vin
         self._attr_is_locking = False
         self._attr_is_unlocking = False
-        # We can get the state but we'll show it as an attribute instead
-        self._attr_force_separate_buttons = True
 
     @property
     def is_locked(self) -> bool | None:
         """Return true if lock is locked."""
-        if self._attr_force_separate_buttons:
+        try:
+            self._attr_state = self.client.get_assumed_lock_state(self.vehicle_id)
             return None
-        return self.client.get_assumed_lock_state(self.vehicle_id)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return the state attributes."""
-        return {
-            "actual_state": self.client.get_assumed_lock_state(self.vehicle_id)
-        }
+        except:
+            return None
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the vehicle doors."""
@@ -64,6 +57,7 @@ class MazdaLock(MazdaEntity, LockEntity):
         self.async_write_ha_state()
         try:
             await self.client.lock_doors(self.vehicle_id)
+            self._attr_state = True
         finally:
             self._attr_is_locking = False
             self.async_write_ha_state()
@@ -74,6 +68,14 @@ class MazdaLock(MazdaEntity, LockEntity):
         self.async_write_ha_state()
         try:
             await self.client.unlock_doors(self.vehicle_id)
+            self._attr_state = False
         finally:
             self._attr_is_unlocking = False
             self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {
+            "lock_state": self.client.get_assumed_lock_state(self.vehicle_id)
+        }
