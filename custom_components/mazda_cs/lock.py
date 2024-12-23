@@ -32,23 +32,31 @@ async def async_setup_entry(
 class MazdaLock(MazdaEntity, LockEntity):
     """Class for the lock."""
 
+    _attr_has_entity_name = True
     _attr_translation_key = "lock"
 
     def __init__(self, client, coordinator, index) -> None:
         """Initialize Mazda lock."""
         super().__init__(client, coordinator, index)
-
         self._attr_unique_id = self.vin
         self._attr_is_locking = False
         self._attr_is_unlocking = False
+        # We can get the state but we'll show it as an attribute instead
+        self._attr_force_separate_buttons = True
 
     @property
     def is_locked(self) -> bool | None:
         """Return true if lock is locked."""
-        try:
-            return self.client.get_assumed_lock_state(self.vehicle_id)
-        except:
+        if self._attr_force_separate_buttons:
             return None
+        return self.client.get_assumed_lock_state(self.vehicle_id)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {
+            "actual_state": self.client.get_assumed_lock_state(self.vehicle_id)
+        }
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the vehicle doors."""
