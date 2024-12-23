@@ -39,20 +39,33 @@ class MazdaLock(MazdaEntity, LockEntity):
         super().__init__(client, coordinator, index)
 
         self._attr_unique_id = self.vin
+        self._attr_is_locking = False
+        self._attr_is_unlocking = False
 
     @property
     def is_locked(self) -> bool | None:
         """Return true if lock is locked."""
-        return self.client.get_assumed_lock_state(self.vehicle_id)
+        try:
+            return self.client.get_assumed_lock_state(self.vehicle_id)
+        except:
+            return None
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the vehicle doors."""
-        await self.client.lock_doors(self.vehicle_id)
-
+        self._attr_is_locking = True
         self.async_write_ha_state()
+        try:
+            await self.client.lock_doors(self.vehicle_id)
+        finally:
+            self._attr_is_locking = False
+            self.async_write_ha_state()
 
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the vehicle doors."""
-        await self.client.unlock_doors(self.vehicle_id)
-
+        self._attr_is_unlocking = True
         self.async_write_ha_state()
+        try:
+            await self.client.unlock_doors(self.vehicle_id)
+        finally:
+            self._attr_is_unlocking = False
+            self.async_write_ha_state()
