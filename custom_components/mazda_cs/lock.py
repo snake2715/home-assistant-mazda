@@ -41,26 +41,14 @@ class MazdaLock(MazdaEntity, LockEntity):
         self._attr_unique_id = self.vin
         self._attr_is_locking = False
         self._attr_is_unlocking = False
-        self._attr_state = None
 
     @property
     def is_locked(self) -> bool | None:
         """Return true if lock is locked."""
-        return None  # Always return None for separate buttons
-
-    @property
-    def state(self) -> str:
-        """Return the state of the lock."""
-        if self._attr_is_locking:
-            return "locking"
-        if self._attr_is_unlocking:
-            return "unlocking"
-        
         try:
-            self._attr_state = self.client.get_assumed_lock_state(self.vehicle_id)
-            return "locked" if self._attr_state else "unlocked"
+            return None  # Force separate buttons
         except:
-            return "locked" if self._attr_state else "unlocked"
+            return None
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the vehicle doors."""
@@ -68,7 +56,6 @@ class MazdaLock(MazdaEntity, LockEntity):
         self.async_write_ha_state()
         try:
             await self.client.lock_doors(self.vehicle_id)
-            self._attr_state = True
         finally:
             self._attr_is_locking = False
             self.async_write_ha_state()
@@ -79,14 +66,6 @@ class MazdaLock(MazdaEntity, LockEntity):
         self.async_write_ha_state()
         try:
             await self.client.unlock_doors(self.vehicle_id)
-            self._attr_state = False
         finally:
             self._attr_is_unlocking = False
             self.async_write_ha_state()
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return the state attributes."""
-        return {
-            "lock_state": self.client.get_assumed_lock_state(self.vehicle_id)
-        }
