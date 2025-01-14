@@ -191,6 +191,15 @@ class Client:  # noqa: D101
 
         return vehicle_status
 
+    async def get_health_report(self, vehicle_id):  # noqa: D102
+        """Get the health report for a vehicle."""
+        health_report_response = await self.controller.get_health_report(vehicle_id)
+    
+        if health_report_response["resultCode"] != "200S00":
+            raise MazdaException("Failed to get health report")
+    
+        return health_report_response
+
     async def get_ev_vehicle_status(self, vehicle_id):  # noqa: D102
         ev_vehicle_status_response = await self.controller.get_ev_vehicle_status(
             vehicle_id
