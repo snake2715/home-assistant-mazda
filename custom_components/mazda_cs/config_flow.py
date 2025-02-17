@@ -12,7 +12,13 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import aiohttp_client
 
 from . import MazdaAccountLockedException, MazdaAPI, MazdaAuthenticationException
-from .const import DOMAIN, MAZDA_REGIONS
+from .const import (
+    DOMAIN,
+    MAZDA_REGIONS,
+    CONF_REFRESH_INTERVAL,
+    CONF_VEHICLE_INTERVAL,
+    CONF_ENDPOINT_INTERVAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,6 +27,41 @@ DATA_SCHEMA = vol.Schema(
         vol.Required(CONF_EMAIL): str,
         vol.Required(CONF_PASSWORD): str,
         vol.Required(CONF_REGION): vol.In(MAZDA_REGIONS),
+        vol.Optional(
+            CONF_REFRESH_INTERVAL,
+            default=900,
+            description={"suggested_value": 900},
+        ): vol.All(vol.Coerce(int), vol.Range(min=300, max=86400)),
+        vol.Optional(
+            CONF_VEHICLE_INTERVAL,
+            default=2,
+            description={"suggested_value": 2},
+        ): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
+        vol.Optional(
+            CONF_ENDPOINT_INTERVAL,
+            default=1,
+            description={"suggested_value": 1},
+        ): vol.All(vol.Coerce(int), vol.Range(min=0, max=30)),
+    }
+)
+
+OPTIONS_SCHEMA = vol.Schema(
+    {
+        vol.Optional(
+            CONF_REFRESH_INTERVAL,
+            default=900,
+            description={"suggested_value": 900},
+        ): vol.All(vol.Coerce(int), vol.Range(min=300, max=86400)),
+        vol.Optional(
+            CONF_VEHICLE_INTERVAL,
+            default=2,
+            description={"suggested_value": 2},
+        ): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
+        vol.Optional(
+            CONF_ENDPOINT_INTERVAL,
+            default=1,
+            description={"suggested_value": 1},
+        ): vol.All(vol.Coerce(int), vol.Range(min=0, max=30)),
     }
 )
 
@@ -91,6 +132,21 @@ class MazdaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_REGION, default=self._region): vol.In(
                         MAZDA_REGIONS
                     ),
+                    vol.Optional(
+                        CONF_REFRESH_INTERVAL,
+                        default=900,
+                        description={"suggested_value": 900},
+                    ): vol.All(vol.Coerce(int), vol.Range(min=300, max=86400)),
+                    vol.Optional(
+                        CONF_VEHICLE_INTERVAL,
+                        default=2,
+                        description={"suggested_value": 2},
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
+                    vol.Optional(
+                        CONF_ENDPOINT_INTERVAL,
+                        default=1,
+                        description={"suggested_value": 1},
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=30)),
                 }
             ),
             errors=errors,
@@ -104,3 +160,54 @@ class MazdaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._email = entry_data[CONF_EMAIL]
         self._region = entry_data[CONF_REGION]
         return await self.async_step_user()
+
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        """Get the options flow for this handler."""
+        return OptionsFlowHandler(config_entry)
+
+
+class OptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options flow."""
+
+    def __init__(self, config_entry):
+        """Initialize options flow."""
+        self.config_entry = config_entry
+
+    async def async_step_init(self, user_input=None):
+        """Manage the options."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        # Get current values with defaults
+        current_options = self.config_entry.options
+        current_data = self.config_entry.data
+
+        options = {
+            vol.Optional(
+                CONF_REFRESH_INTERVAL,
+                default=current_options.get(
+                    CONF_REFRESH_INTERVAL,
+                    current_data.get(CONF_REFRESH_INTERVAL, 900)
+                ),
+            ): vol.All(vol.Coerce(int), vol.Range(min=300, max=86400)),
+            vol.Optional(
+                CONF_VEHICLE_INTERVAL,
+                default=current_options.get(
+                    CONF_VEHICLE_INTERVAL,
+                    current_data.get(CONF_VEHICLE_INTERVAL, 2)
+                ),
+            ): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
+            vol.Optional(
+                CONF_ENDPOINT_INTERVAL,
+                default=current_options.get(
+                    CONF_ENDPOINT_INTERVAL,
+                    current_data.get(CONF_ENDPOINT_INTERVAL, 1)
+                ),
+            ): vol.All(vol.Coerce(int), vol.Range(min=0, max=30)),
+        }
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(options),
+        )

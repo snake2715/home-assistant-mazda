@@ -28,7 +28,16 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .const import DATA_CLIENT, DATA_COORDINATOR, DATA_REGION, DATA_VEHICLES, DOMAIN
+from .const import (
+    CONF_REFRESH_INTERVAL,
+    CONF_VEHICLE_INTERVAL,
+    CONF_ENDPOINT_INTERVAL,
+    DATA_CLIENT,
+    DATA_COORDINATOR,
+    DATA_REGION,
+    DATA_VEHICLES,
+    DOMAIN,
+)
 from .pymazda.client import Client as MazdaAPI
 from .pymazda.exceptions import (
     MazdaAccountLockedException,
@@ -148,45 +157,116 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }
     )
 
-    async def async_update_data():
-        """Fetch data from Mazda API."""
-        try:
-            vehicles = await with_timeout(mazda_client.get_vehicles())
-
-            # The Mazda API can throw an error when multiple simultaneous requests are
-            # made for the same account, so we can only make one request at a time here
-            for vehicle in vehicles:
-                vehicle["status"] = await with_timeout(
-                    mazda_client.get_vehicle_status(vehicle["id"])
-                )
-
-                # If vehicle is electric, get additional EV-specific status info
-                if vehicle["isElectric"]:
-                    vehicle["evStatus"] = await with_timeout(
-                        mazda_client.get_ev_vehicle_status(vehicle["id"])
+    class MazdaDataUpdateCoordinator(DataUpdateCoordinator):
+        def __init__(
+            self,
+            hass: HomeAssistant,
+            client: MazdaAPI,
+            config_entry: ConfigEntry,
+        ) -> None:
+            self.client = client
+            self.config_entry = config_entry
+            super().__init__(
+                hass,
+                _LOGGER,
+                name=DOMAIN,
+                update_interval=timedelta(
+                    seconds=config_entry.options.get(
+                        CONF_REFRESH_INTERVAL,
+                        config_entry.data.get(CONF_REFRESH_INTERVAL, 900)
                     )
-                    vehicle["hvacSetting"] = await with_timeout(
-                        mazda_client.get_hvac_setting(vehicle["id"])
-                    )
-
-            hass.data[DOMAIN][entry.entry_id][DATA_VEHICLES] = vehicles
-
-            return vehicles
-        except MazdaAuthenticationException as ex:
-            raise ConfigEntryAuthFailed("Not authenticated with Mazda API") from ex
-        except Exception as ex:
-            _LOGGER.exception(
-                "Unknown error occurred during Mazda update request: %s", ex
+                ),
             )
-            raise UpdateFailed(ex) from ex
+            # Store the intervals for use during updates
+            self.vehicle_interval = config_entry.options.get(
+                CONF_VEHICLE_INTERVAL,
+                config_entry.data.get(CONF_VEHICLE_INTERVAL, 2)
+            )
+            self.endpoint_interval = config_entry.options.get(
+                CONF_ENDPOINT_INTERVAL,
+                config_entry.data.get(CONF_ENDPOINT_INTERVAL, 1)
+            )
 
-    coordinator = DataUpdateCoordinator(
-        hass,
-        _LOGGER,
-        name=DOMAIN,
-        update_method=async_update_data,
-        update_interval=timedelta(seconds=180),
-    )
+        async def _async_update_data(self):
+            """Fetch data from Mazda API."""
+            try:
+                vehicles = await with_timeout(self.client.get_vehicles())
+                _LOGGER.debug("Response from get_vehicles(): %s", vehicles)
+                updated_vehicles = []
+
+                for vehicle in vehicles:
+                    # Add delay between vehicles
+                    if updated_vehicles:  # Don't delay for the first vehicle
+                        await asyncio.sleep(self.vehicle_interval)
+
+                    try:
+                        vehicle_data = {
+                            "id": vehicle.get("id"),
+                            "vin": vehicle.get("vin"),
+                            "modelYear": vehicle.get("modelYear", "Unknown"),
+                            "carlineName": vehicle.get("carlineName", "Unknown"),
+                            "isElectric": vehicle.get("isElectric", False)
+                        }
+
+                        _LOGGER.debug("Processing vehicle data: %s", vehicle_data)
+
+                        # Get vehicle status
+                        vehicle_data["status"] = await with_timeout(
+                            self.client.get_vehicle_status(vehicle_data["id"])
+                        )
+                        _LOGGER.debug("Vehicle status: %s", vehicle_data["status"])
+                        
+                        # Add delay between endpoints for the same vehicle
+                        if self.endpoint_interval > 0:
+                            await asyncio.sleep(self.endpoint_interval)
+
+                        if vehicle_data["isElectric"]:
+                            # Get EV status
+                            vehicle_data["evStatus"] = await with_timeout(
+                                self.client.get_ev_vehicle_status(vehicle_data["id"])
+                            )
+                            _LOGGER.debug("EV status: %s", vehicle_data["evStatus"])
+                            
+                            # Add delay between endpoints
+                            if self.endpoint_interval > 0:
+                                await asyncio.sleep(self.endpoint_interval)
+                            
+                            # Get HVAC settings
+                            vehicle_data["hvacSetting"] = await with_timeout(
+                                self.client.get_hvac_setting(vehicle_data["id"])
+                            )
+                            _LOGGER.debug("HVAC settings: %s", vehicle_data["hvacSetting"])
+
+                        updated_vehicles.append(vehicle_data)
+                        _LOGGER.debug("Successfully processed vehicle: %s", vehicle_data["vin"])
+
+                    except KeyError as err:
+                        _LOGGER.error(
+                            "Missing required field %s in vehicle data: %s", 
+                            err, 
+                            vehicle
+                        )
+                        continue
+                    except Exception as ex:
+                        _LOGGER.error(
+                            "Error processing vehicle %s: %s", 
+                            vehicle.get("vin", "Unknown VIN"), 
+                            ex
+                        )
+                        continue
+
+                if not updated_vehicles:
+                    raise UpdateFailed("No vehicles could be processed successfully")
+
+                self.hass.data[DOMAIN][self.config_entry.entry_id][DATA_VEHICLES] = updated_vehicles
+                return updated_vehicles
+
+            except MazdaAuthenticationException as ex:
+                raise ConfigEntryAuthFailed("Not authenticated") from ex
+            except Exception as ex:
+                raise UpdateFailed(f"Error communicating with API: {ex}") from ex
+
+    coordinator = MazdaDataUpdateCoordinator(hass, mazda_client, entry)
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
