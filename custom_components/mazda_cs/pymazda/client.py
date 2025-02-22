@@ -1,9 +1,12 @@
 import datetime  # noqa: D100
 import json
+import logging
 
 from .controller import Controller
 from .exceptions import MazdaConfigException
 
+
+_LOGGER = logging.getLogger(__name__)
 
 class Client:  # noqa: D101
     def __init__(  # noqa: D107
@@ -85,6 +88,7 @@ class Client:  # noqa: D101
                     "exteriorColorName"
                 ),
                 "isElectric": current_vec_base_info.get("econnectType", 0) == 1,
+                "hasFuel": other_veh_info.get("CVServiceInformation", {}).get("fuelType", "00") != "05"
             }
 
             vehicles.append(vehicle)

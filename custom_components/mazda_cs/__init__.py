@@ -188,83 +188,86 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
         async def _async_update_data(self):
-            """Fetch data from Mazda API."""
+            """Fetch data from Mazda API with rate limiting."""
             try:
                 vehicles = await with_timeout(self.client.get_vehicles())
-                _LOGGER.debug("Response from get_vehicles(): %s", vehicles)
+                _LOGGER.debug("Initial vehicles data: %s", vehicles)
+                
                 updated_vehicles = []
-
-                for vehicle in vehicles:
-                    # Add delay between vehicles
-                    if updated_vehicles:  # Don't delay for the first vehicle
+                vehicle_count = len(vehicles)
+                
+                for index, vehicle in enumerate(vehicles):
+                    # Add inter-vehicle delay after first vehicle
+                    if index > 0 and self.vehicle_interval > 0:
+                        _LOGGER.debug("Waiting %.1fs between vehicles", self.vehicle_interval)
                         await asyncio.sleep(self.vehicle_interval)
-
+                    
                     try:
-                        vehicle_data = {
-                            "id": vehicle.get("id"),
-                            "vin": vehicle.get("vin"),
-                            "modelYear": vehicle.get("modelYear", "Unknown"),
-                            "carlineName": vehicle.get("carlineName", "Unknown"),
-                            "isElectric": vehicle.get("isElectric", False)
-                        }
-
-                        _LOGGER.debug("Processing vehicle data: %s", vehicle_data)
-
-                        # Get vehicle status
-                        vehicle_data["status"] = await with_timeout(
-                            self.client.get_vehicle_status(vehicle_data["id"])
-                        )
-                        _LOGGER.debug("Vehicle status: %s", vehicle_data["status"])
+                        vin = vehicle["vin"]
+                        _LOGGER.debug("Processing vehicle %d/%d: VIN %s", 
+                                    index+1, vehicle_count, vin)
                         
-                        # Add delay between endpoints for the same vehicle
+                        # Add status with endpoint delay
+                        vehicle["status"] = await with_timeout(
+                            self.client.get_vehicle_status(vehicle["id"])
+                        )
                         if self.endpoint_interval > 0:
                             await asyncio.sleep(self.endpoint_interval)
-
-                        if vehicle_data["isElectric"]:
-                            # Get EV status
-                            vehicle_data["evStatus"] = await with_timeout(
-                                self.client.get_ev_vehicle_status(vehicle_data["id"])
+                        
+                        # EV-specific endpoints
+                        if vehicle.get("isElectric"):
+                            vehicle["evStatus"] = await with_timeout(
+                                self.client.get_ev_vehicle_status(vehicle["id"])
                             )
-                            _LOGGER.debug("EV status: %s", vehicle_data["evStatus"])
-                            
-                            # Add delay between endpoints
                             if self.endpoint_interval > 0:
                                 await asyncio.sleep(self.endpoint_interval)
                             
-                            # Get HVAC settings
-                            vehicle_data["hvacSetting"] = await with_timeout(
-                                self.client.get_hvac_setting(vehicle_data["id"])
+                            vehicle["hvacSetting"] = await with_timeout(
+                                self.client.get_hvac_setting(vehicle["id"])
                             )
-                            _LOGGER.debug("HVAC settings: %s", vehicle_data["hvacSetting"])
-
-                        updated_vehicles.append(vehicle_data)
-                        _LOGGER.debug("Successfully processed vehicle: %s", vehicle_data["vin"])
-
-                    except KeyError as err:
-                        _LOGGER.error(
-                            "Missing required field %s in vehicle data: %s", 
-                            err, 
-                            vehicle
-                        )
-                        continue
+                            if self.endpoint_interval > 0:
+                                await asyncio.sleep(self.endpoint_interval)
+                        
+                        updated_vehicles.append(vehicle)
+                        _LOGGER.debug("Completed vehicle %s", vin)
+                    
                     except Exception as ex:
-                        _LOGGER.error(
-                            "Error processing vehicle %s: %s", 
-                            vehicle.get("vin", "Unknown VIN"), 
-                            ex
-                        )
+                        _LOGGER.error("Error processing VIN %s: %s", vin, ex)
                         continue
 
                 if not updated_vehicles:
-                    raise UpdateFailed("No vehicles could be processed successfully")
-
+                    raise UpdateFailed("All vehicle updates failed")
+                
                 self.hass.data[DOMAIN][self.config_entry.entry_id][DATA_VEHICLES] = updated_vehicles
                 return updated_vehicles
-
+            
             except MazdaAuthenticationException as ex:
-                raise ConfigEntryAuthFailed("Not authenticated") from ex
+                raise ConfigEntryAuthFailed("Session expired") from ex
             except Exception as ex:
-                raise UpdateFailed(f"Error communicating with API: {ex}") from ex
+                raise UpdateFailed(f"API communication error: {ex}") from ex
+
+        async def async_get_health_report(self, vehicle, access_token):
+            """Get the vehicle health report."""
+            _LOGGER.debug(f"Fetching health report for VIN: {vehicle.vin}")  # Add logging here
+            headers = self._generate_headers(access_token)
+            data = {
+                "vin": vehicle.vin, # Use vehicle.vin directly
+                "deviceId": self.client.device_id, # Access device_id from self.client
+                "locale": "en-US",
+                "regionCode": self.config_entry.data["region"].upper(), # Get region from config entry
+            }
+            api_url = f"{self.client.base_url}/prod/remoteServices/getHealthReport/v4" # Access base_url from self.client
+
+            try: # Include try-except block for error handling (similar to other methods)
+                return await self._make_request( # Use self._make_request, which is in this class
+                    "POST",
+                    api_url,
+                    headers=headers,
+                    json=data
+                )
+            except MazdaAPIError as error: # Catch MazdaAPIError
+                _LOGGER.warning(f"API error fetching health report for {vehicle.vin}: {error}") # Log warning with VIN
+                return None # Return None on error
 
     coordinator = MazdaDataUpdateCoordinator(hass, mazda_client, entry)
 
@@ -319,6 +322,15 @@ class MazdaEntity(CoordinatorEntity):
         self.index = index
         self.vin = self.data["vin"]
         self.vehicle_id = self.data["id"]
+        
+        _LOGGER.debug(
+            "Creating entity for VIN %s - Nickname: %s | Model: %s %s",
+            self.vin,
+            self.data.get("nickname", "None"),
+            self.data.get("modelYear", "Unknown"),
+            self.data.get("carlineName", "Unknown")
+        )
+
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self.vin)},
             manufacturer="Mazda",
@@ -334,6 +346,20 @@ class MazdaEntity(CoordinatorEntity):
     @property
     def vehicle_name(self):
         """Return the vehicle name, to be used as a prefix for names of other entities."""
-        if "nickname" in self.data and len(self.data["nickname"]) > 0:
-            return self.data["nickname"]
-        return f"{self.data['modelYear']} {self.data['carlineName']}"
+        nickname = self.data.get("nickname")
+        fallback = f"{self.data['modelYear']} {self.data['carlineName']}"
+        
+        if nickname and len(nickname) > 0:
+            _LOGGER.debug(
+                "Using nickname '%s' for VIN %s",
+                nickname,
+                self.vin
+            )
+            return nickname
+            
+        _LOGGER.debug(
+            "Using fallback name for VIN %s: %s",
+            self.vin,
+            fallback
+        )
+        return fallback

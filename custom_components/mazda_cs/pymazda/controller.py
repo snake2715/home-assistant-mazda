@@ -2,7 +2,9 @@ import hashlib  # noqa: D100
 
 from .connection import Connection
 from .exceptions import MazdaException
+import logging
 
+_LOGGER = logging.getLogger(__name__)
 
 class Controller:  # noqa: D101
     def __init__(self, email, password, region, websession=None):  # noqa: D107
@@ -211,7 +213,12 @@ class Controller:  # noqa: D101
         if response["resultCode"] != "200S00":
             raise MazdaException("Failed to get vehicle nickname")
 
-        return response["carlineDesc"]
+        # Ensure we log the response to debug potential issues
+        nickname = response.get("nickname") or response.get("vtitle") or response["carlineDesc"]
+        _LOGGER.debug(f"Retrieved nickname for VIN {vin}: {nickname}")
+
+        return nickname  # This now prioritizes nickname > vtitle > carlineDesc
+
 
     async def update_nickname(self, vin, new_nickname):  # noqa: D102
         if len(vin) != 17:
@@ -235,6 +242,8 @@ class Controller:  # noqa: D101
 
         if response["resultCode"] != "200S00":
             raise MazdaException("Failed to update vehicle nickname")
+
+        _LOGGER.debug(f"Successfully updated nickname for VIN {vin} to {new_nickname}")
 
     async def send_poi(self, internal_vin, latitude, longitude, name):  # noqa: D102
         # Calculate a POI ID that is unique to the name and location
