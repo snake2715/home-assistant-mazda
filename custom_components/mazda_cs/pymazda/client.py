@@ -98,24 +98,24 @@ class Client:  # noqa: D101
         return vehicles
 
     async def get_vehicle_status(self, vehicle_id):  # noqa: D102
-        vehicle_status_response = await self.controller.get_vehicle_status(vehicle_id)
+        response = await self.controller.get_vehicle_status(vehicle_id)
 
-        alert_info = vehicle_status_response.get("alertInfos")[0]
-        remote_info = vehicle_status_response.get("remoteInfos")[0]
+        if response is None or "alertInfos" not in response or not response["alertInfos"]:
+            _LOGGER.error(f"Invalid response received for VIN {vehicle_id}: {response}")
+            return None  # Handle the case where the response is empty
+
+        alert_info = response.get("alertInfos", [{}])[0]  # Use [{}] as a safe default
+        remote_info = response.get("remoteInfos", [{}])[0]
 
         latitude = remote_info.get("PositionInfo", {}).get("Latitude")
         if latitude is not None:
             latitude = latitude * (
-                -1
-                if remote_info.get("PositionInfo", {}).get("LatitudeFlag") == 1
-                else 1
+                -1 if remote_info.get("PositionInfo", {}).get("LatitudeFlag") == 1 else 1
             )
         longitude = remote_info.get("PositionInfo", {}).get("Longitude")
         if longitude is not None:
             longitude = longitude * (
-                1
-                if remote_info.get("PositionInfo", {}).get("LongitudeFlag") == 1
-                else -1
+                1 if remote_info.get("PositionInfo", {}).get("LongitudeFlag") == 1 else -1
             )
 
         vehicle_status = {
@@ -142,14 +142,12 @@ class Client:  # noqa: D101
                 "fuelLidOpen": alert_info.get("Door", {}).get("FuelLidOpenStatus") == 1,
             },
             "doorLocks": {
-                "driverDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwDrv")
-                == 1,
+                "driverDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwDrv") == 1,
                 "passengerDoorUnlocked": alert_info.get("Door", {}).get(
                     "LockLinkSwPsngr"
                 )
                 == 1,
-                "rearLeftDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwRl")
-                == 1,
+                "rearLeftDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwRl") == 1,
                 "rearRightDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwRr")
                 == 1,
             },
@@ -194,6 +192,7 @@ class Client:  # noqa: D101
         )
 
         return vehicle_status
+
 
     async def get_ev_vehicle_status(self, vehicle_id):  # noqa: D102
         ev_vehicle_status_response = await self.controller.get_ev_vehicle_status(

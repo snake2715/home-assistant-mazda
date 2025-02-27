@@ -62,8 +62,18 @@ PLATFORMS = [
 
 async def with_timeout(task, timeout_seconds=30):
     """Run an async task with a timeout."""
-    async with asyncio.timeout(timeout_seconds):
-        return await task
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            try:
+                return await task
+            except asyncio.CancelledError:
+                _LOGGER.warning("Task was cancelled, will retry once")
+                # Give a short pause and retry once
+                await asyncio.sleep(1)
+                return await task
+    except asyncio.TimeoutError:
+        _LOGGER.error("Timeout after %s seconds", timeout_seconds)
+        raise
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -190,7 +200,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def _async_update_data(self):
             """Fetch data from Mazda API with rate limiting."""
             try:
-                vehicles = await with_timeout(self.client.get_vehicles())
+                vehicles = await with_timeout(self.client.get_vehicles(), timeout_seconds=60)
                 _LOGGER.debug("Initial vehicles data: %s", vehicles)
                 
                 updated_vehicles = []
@@ -207,26 +217,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.debug("Processing vehicle %d/%d: VIN %s", 
                                     index+1, vehicle_count, vin)
                         
-                        # Add status with endpoint delay
-                        vehicle["status"] = await with_timeout(
-                            self.client.get_vehicle_status(vehicle["id"])
-                        )
-                        if self.endpoint_interval > 0:
-                            await asyncio.sleep(self.endpoint_interval)
+                        # Add status with endpoint delay and extended timeout
+                        try:
+                            vehicle["status"] = await with_timeout(
+                                self.client.get_vehicle_status(vehicle["id"]),
+                                timeout_seconds=45
+                            )
+                            if self.endpoint_interval > 0:
+                                await asyncio.sleep(self.endpoint_interval)
+                        except Exception as status_ex:
+                            _LOGGER.error("Failed to get status for VIN %s: %s", vin, status_ex)
+                            vehicle["status"] = None
                         
                         # EV-specific endpoints
                         if vehicle.get("isElectric"):
-                            vehicle["evStatus"] = await with_timeout(
-                                self.client.get_ev_vehicle_status(vehicle["id"])
-                            )
-                            if self.endpoint_interval > 0:
-                                await asyncio.sleep(self.endpoint_interval)
-                            
-                            vehicle["hvacSetting"] = await with_timeout(
-                                self.client.get_hvac_setting(vehicle["id"])
-                            )
-                            if self.endpoint_interval > 0:
-                                await asyncio.sleep(self.endpoint_interval)
+                            try:
+                                vehicle["evStatus"] = await with_timeout(
+                                    self.client.get_ev_vehicle_status(vehicle["id"]),
+                                    timeout_seconds=45
+                                )
+                                if self.endpoint_interval > 0:
+                                    await asyncio.sleep(self.endpoint_interval)
+                            except Exception as ev_ex:
+                                _LOGGER.error("Failed to get EV status for VIN %s: %s", vin, ev_ex)
+                                vehicle["evStatus"] = None
                         
                         updated_vehicles.append(vehicle)
                         _LOGGER.debug("Completed vehicle %s", vin)
@@ -244,7 +258,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except MazdaAuthenticationException as ex:
                 raise ConfigEntryAuthFailed("Session expired") from ex
             except Exception as ex:
-                raise UpdateFailed(f"API communication error: {ex}") from ex
+                _LOGGER.error("Failed to update data: %s", ex)
+                raise UpdateFailed(f"Error communicating with API: {ex}") from ex
 
         async def async_get_health_report(self, vehicle, access_token):
             """Get the vehicle health report."""
