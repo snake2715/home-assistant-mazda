@@ -15,9 +15,36 @@
         "data": {
           "email": "[%key:common::config_flow::data::email%]",
           "password": "[%key:common::config_flow::data::password%]",
-          "region": "Region"
+          "region": "[%key:common::config_flow::data::region%]"
         },
-        "description": "Please enter the email address and password you use to log into the MyMazda mobile app."
+        "description": "Enter your Mazda Connected Services credentials.",
+        "title": "Mazda Connected Services"
+      },
+      "choose_region": {
+        "data": {
+          "region": "Select your region"
+        },
+        "description": "Please select your Mazda region",
+        "title": "Region Selection"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Mazda Connected Services Options",
+        "description": "Adjust update frequencies and API throttling for your Mazda Connected Services.",
+        "data": {
+          "refresh_interval": "Status Update Frequency (minutes)",
+          "health_report_interval": "Health Report Frequency (minutes)",
+          "vehicle_interval": "Vehicle Processing Delay (seconds)",
+          "endpoint_interval": "API Call Delay (seconds)",
+          "health_vehicle_interval": "Health Report API Delay (seconds)",
+          "debug_mode": "Debug Mode",
+          "log_responses": "Log API Responses",
+          "testing_mode": "Testing Mode",
+          "enable_metrics": "Performance Metrics"
+        }
       }
     }
   },
@@ -43,6 +70,45 @@
       },
       "ev_plugged_in": {
         "name": "Plugged in"
+      },
+      "doors_locked": {
+        "name": "Doors Locked"
+      },
+      "hazard_lights": {
+        "name": "Hazard Lights"
+      },
+      "hood_open": {
+        "name": "Hood"
+      },
+      "driver_door": {
+        "name": "Driver's Door"
+      },
+      "passenger_door": {
+        "name": "Passenger's Door"
+      },
+      "rear_left_door": {
+        "name": "Rear Left Door"
+      },
+      "rear_right_door": {
+        "name": "Rear Right Door"
+      },
+      "trunk_open": {
+        "name": "Trunk"
+      },
+      "fuel_lid_open": {
+        "name": "Fuel Lid"
+      },
+      "driver_window": {
+        "name": "Driver's Window"
+      },
+      "passenger_window": {
+        "name": "Passenger's Window"
+      },
+      "rear_left_window": {
+        "name": "Rear Left Window"
+      },
+      "rear_right_window": {
+        "name": "Rear Right Window"
       }
     },
     "button": {
@@ -60,11 +126,20 @@
       },
       "refresh_vehicle_status": {
         "name": "Refresh status"
+      },
+      "refresh_data": {
+        "name": "Refresh Data"
+      },
+      "refresh_health_data": {
+        "name": "Refresh Health Data"
       }
     },
     "climate": {
       "climate": {
         "name": "[%key:component::climate::title%]"
+      },
+      "climate_control": {
+        "name": "Climate Control"
       }
     },
     "device_tracker": {
@@ -107,6 +182,42 @@
       },
       "ev_remaining_range_bev": {
         "name": "Remaining range BEV"
+      },
+      "ev_charge_level": {
+        "name": "EV Charge Level"
+      },
+      "ev_battery_temperature": {
+        "name": "EV Battery Temperature"
+      },
+      "ev_drive_range": {
+        "name": "EV Drive Range"
+      },
+      "ev_charging_status": {
+        "name": "EV Charging Status"
+      },
+      "ev_charge_time_remaining": {
+        "name": "EV Charge Time Remaining"
+      },
+      "odometer": {
+        "name": "Odometer"
+      },
+      "fuel_remaining": {
+        "name": "Fuel Remaining"
+      },
+      "fuel_distance_remaining": {
+        "name": "Fuel Distance Remaining"
+      },
+      "front_left_tire_pressure": {
+        "name": "Front Left Tire Pressure"
+      },
+      "front_right_tire_pressure": {
+        "name": "Front Right Tire Pressure"
+      },
+      "rear_left_tire_pressure": {
+        "name": "Rear Left Tire Pressure"
+      },
+      "rear_right_tire_pressure": {
+        "name": "Rear Right Tire Pressure"
       }
     },
     "switch": {

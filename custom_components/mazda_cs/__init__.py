@@ -29,14 +29,29 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .const import (
+    CONF_OPTIONS,
     CONF_REFRESH_INTERVAL,
     CONF_VEHICLE_INTERVAL,
     CONF_ENDPOINT_INTERVAL,
+    CONF_HEALTH_REPORT_INTERVAL,
+    CONF_HEALTH_VEHICLE_INTERVAL,
+    CONF_DEBUG_MODE,
+    CONF_LOG_RESPONSES,
+    CONF_TESTING_MODE,
+    CONF_ENABLE_METRICS,
     DATA_CLIENT,
     DATA_COORDINATOR,
+    DATA_HEALTH_COORDINATOR,
+    DATA_EMAIL,
+    DATA_PASSWORD,
     DATA_REGION,
     DATA_VEHICLES,
     DOMAIN,
+    DEFAULT_REFRESH_INTERVAL,
+    DEFAULT_VEHICLE_INTERVAL,
+    DEFAULT_ENDPOINT_INTERVAL,
+    DEFAULT_HEALTH_REPORT_INTERVAL,
+    DEFAULT_HEALTH_VEHICLE_INTERVAL,
 )
 from .pymazda.client import Client as MazdaAPI
 from .pymazda.exceptions import (
@@ -78,17 +93,78 @@ async def with_timeout(task, timeout_seconds=30):
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Mazda Connected Services from a config entry."""
+    hass.data.setdefault(DOMAIN, {})
+    mazda_logger = logging.getLogger("pymazda")
+
+    # Set up and apply configuration options
+    if CONF_DEBUG_MODE in entry.options and entry.options[CONF_DEBUG_MODE]:
+        _LOGGER.setLevel(logging.DEBUG)
+        mazda_logger.setLevel(logging.DEBUG)
+        _LOGGER.debug("Debug logging enabled for Mazda integration")
+    
+    refresh_interval = entry.options.get(
+        CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL // 60
+    ) * 60  # Convert minutes to seconds
+    
+    health_report_interval = entry.options.get(
+        CONF_HEALTH_REPORT_INTERVAL, DEFAULT_HEALTH_REPORT_INTERVAL // 60
+    ) * 60  # Convert minutes to seconds
+    
+    vehicle_interval = entry.options.get(CONF_VEHICLE_INTERVAL, DEFAULT_VEHICLE_INTERVAL)
+    endpoint_interval = entry.options.get(CONF_ENDPOINT_INTERVAL, DEFAULT_ENDPOINT_INTERVAL)
+    health_vehicle_interval = entry.options.get(
+        CONF_HEALTH_VEHICLE_INTERVAL, DEFAULT_HEALTH_VEHICLE_INTERVAL
+    )
+    
+    # Enable testing mode if selected
+    if CONF_TESTING_MODE in entry.options and entry.options[CONF_TESTING_MODE]:
+        _LOGGER.warning("TESTING MODE ENABLED - using accelerated update intervals")
+        if refresh_interval > 300:  # 5 minutes in seconds
+            refresh_interval = 300
+            _LOGGER.info("Testing mode: Using 5-minute status refresh interval")
+        
+        if health_report_interval > 900:  # 15 minutes in seconds
+            health_report_interval = 900
+            _LOGGER.info("Testing mode: Using 15-minute health report interval")
+    
+    # Enable API response logging if selected
+    log_api_responses = entry.options.get(CONF_LOG_RESPONSES, False)
+    if log_api_responses:
+        _LOGGER.warning(
+            "API response logging enabled - this may expose sensitive data in logs"
+        )
+    
+    # Setup performance metrics tracking if enabled
+    track_performance = entry.options.get(CONF_ENABLE_METRICS, False)
+    perf_metrics = {} if track_performance else None
+    
+    _LOGGER.debug(
+        "Using configuration: refresh=%ds, vehicle=%ds, endpoint=%ds, health=%ds, health_vehicle=%ds",
+        refresh_interval,
+        vehicle_interval,
+        endpoint_interval,
+        health_report_interval,
+        health_vehicle_interval,
+    )
+
     email = entry.data[CONF_EMAIL]
     password = entry.data[CONF_PASSWORD]
     region = entry.data[CONF_REGION]
 
     websession = aiohttp_client.async_get_clientsession(hass)
-    mazda_client = MazdaAPI(
-        email, password, region, websession=websession, use_cached_vehicle_list=True
+    client = MazdaAPI(
+        email=entry.data[CONF_EMAIL],
+        password=entry.data[CONF_PASSWORD],
+        region=entry.data[CONF_REGION],
+        websession=websession,
+        vehicle_interval=vehicle_interval,
+        endpoint_interval=endpoint_interval,
+        log_api_responses=log_api_responses,
+        performance_metrics=perf_metrics,
     )
 
     try:
-        await mazda_client.validate_credentials()
+        await client.validate_credentials()
     except MazdaAuthenticationException as ex:
         raise ConfigEntryAuthFailed from ex
     except (
@@ -141,6 +217,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as ex:
             raise HomeAssistantError(ex) from ex
 
+    services = {
+        "lock_doors": "door_lock",
+        "unlock_doors": "door_unlock",
+        "engine_start": "engine_start",
+        "engine_stop": "engine_stop",
+        "hazard_lights": "light_on",
+        "send_poi": None,  # Special case, handled separately
+        "check_command_status": None,  # New service to check command status
+    }
+
     def validate_mazda_device_id(device_id):
         """Check that a device ID exists in the registry and has at least one 'mazda' identifier."""
         dev_reg = dr.async_get(hass)
@@ -167,35 +253,105 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }
     )
 
-    class MazdaDataUpdateCoordinator(DataUpdateCoordinator):
+    async def handle_check_command_status(service_call):
+        """Check the status of a previously executed command."""
+        device_id = service_call.data["device_id"]
+        visit_no = service_call.data["visit_no"]
+        
+        dev_reg = dr.async_get(hass)
+        device = dev_reg.async_get(device_id)
+        
+        if not device:
+            raise HomeAssistantError(f"Device {device_id} not found")
+            
+        # Get the VIN from the device identifier
+        vin = None
+        for identifier in device.identifiers:
+            if identifier[0] == DOMAIN:
+                vin = identifier[1]
+                break
+                
+        if not vin:
+            raise HomeAssistantError(f"Device {device_id} is not a Mazda vehicle")
+            
+        # Find the vehicle and client
+        vehicle_id = 0
+        api_client = None
+        
+        for entry_data in hass.data[DOMAIN].values():
+            for vehicle in entry_data[DATA_VEHICLES]:
+                if vehicle["vin"] == vin:
+                    vehicle_id = vehicle["id"]
+                    api_client = entry_data[DATA_CLIENT]
+                    break
+                    
+        if vehicle_id == 0 or api_client is None:
+            raise HomeAssistantError("Vehicle ID not found")
+            
+        try:
+            status = await api_client.get_command_status(vehicle_id, visit_no)
+            _LOGGER.info(f"Command status for visit_no {visit_no}: {status}")
+            return {"status": status}
+        except Exception as ex:
+            _LOGGER.error(f"Error checking command status: {ex}")
+            raise HomeAssistantError(f"Failed to check command status: {ex}") from ex
+
+    service_schema_check_command_status = vol.Schema(
+        {
+            vol.Required("device_id"): vol.All(cv.string, validate_mazda_device_id),
+            vol.Required("visit_no"): cv.string,
+        }
+    )
+
+    class MazdaVehicleUpdateCoordinator(DataUpdateCoordinator):
+        """Class to manage fetching Mazda data."""
+
         def __init__(
             self,
             hass: HomeAssistant,
             client: MazdaAPI,
             config_entry: ConfigEntry,
         ) -> None:
+            """Initialize coordinator with config and client."""
             self.client = client
             self.config_entry = config_entry
+            
+            refresh_minutes = config_entry.options.get(
+                CONF_REFRESH_INTERVAL, 
+                config_entry.data.get(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL)
+            )
+            refresh_seconds = int(refresh_minutes * 60)
+            
+            # Calculate time between vehicle API calls to avoid rate limits
+            self.vehicle_interval = config_entry.options.get(
+                CONF_VEHICLE_INTERVAL,
+                config_entry.data.get(CONF_VEHICLE_INTERVAL, DEFAULT_VEHICLE_INTERVAL)
+            )
+            
+            # Small interval between consecutive API endpoints
+            self.endpoint_interval = config_entry.options.get(
+                CONF_ENDPOINT_INTERVAL,
+                config_entry.data.get(CONF_ENDPOINT_INTERVAL, DEFAULT_ENDPOINT_INTERVAL)
+            )
+
             super().__init__(
                 hass,
                 _LOGGER,
-                name=DOMAIN,
-                update_interval=timedelta(
-                    seconds=config_entry.options.get(
-                        CONF_REFRESH_INTERVAL,
-                        config_entry.data.get(CONF_REFRESH_INTERVAL, 900)
-                    )
-                ),
+                name=f"{DOMAIN}_vehicle_status",
+                update_interval=timedelta(seconds=refresh_seconds),
             )
-            # Store the intervals for use during updates
-            self.vehicle_interval = config_entry.options.get(
-                CONF_VEHICLE_INTERVAL,
-                config_entry.data.get(CONF_VEHICLE_INTERVAL, 2)
+            
+            _LOGGER.info(
+                "Vehicle coordinator initialized with update interval: %.1f minutes (%d seconds), "
+                "vehicle interval: %d seconds, endpoint interval: %d seconds", 
+                refresh_minutes, 
+                refresh_seconds, 
+                self.vehicle_interval,
+                self.endpoint_interval
             )
-            self.endpoint_interval = config_entry.options.get(
-                CONF_ENDPOINT_INTERVAL,
-                config_entry.data.get(CONF_ENDPOINT_INTERVAL, 1)
-            )
+            
+            # Initialize with empty list
+            self.data = []
 
         async def _async_update_data(self):
             """Fetch data from Mazda API with rate limiting."""
@@ -252,8 +408,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not updated_vehicles:
                     raise UpdateFailed("All vehicle updates failed")
                 
-                self.hass.data[DOMAIN][self.config_entry.entry_id][DATA_VEHICLES] = updated_vehicles
-                return updated_vehicles
+                self.data = updated_vehicles
+                return self.data
             
             except MazdaAuthenticationException as ex:
                 raise ConfigEntryAuthFailed("Session expired") from ex
@@ -261,63 +417,257 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error("Failed to update data: %s", ex)
                 raise UpdateFailed(f"Error communicating with API: {ex}") from ex
 
-        async def async_get_health_report(self, vehicle, access_token):
-            """Get the vehicle health report."""
-            _LOGGER.debug(f"Fetching health report for VIN: {vehicle.vin}")  # Add logging here
-            headers = self._generate_headers(access_token)
-            data = {
-                "vin": vehicle.vin, # Use vehicle.vin directly
-                "deviceId": self.client.device_id, # Access device_id from self.client
-                "locale": "en-US",
-                "regionCode": self.config_entry.data["region"].upper(), # Get region from config entry
-            }
-            api_url = f"{self.client.base_url}/prod/remoteServices/getHealthReport/v4" # Access base_url from self.client
+    class MazdaHealthUpdateCoordinator(DataUpdateCoordinator):
+        def __init__(
+            self,
+            hass: HomeAssistant,
+            client: MazdaAPI,
+            config_entry: ConfigEntry,
+        ) -> None:
+            self.client = client
+            self.config_entry = config_entry
+            
+            # Convert minutes to seconds for health report interval
+            health_minutes = config_entry.options.get(
+                CONF_HEALTH_REPORT_INTERVAL,
+                config_entry.data.get(CONF_HEALTH_REPORT_INTERVAL, DEFAULT_HEALTH_REPORT_INTERVAL)
+            )
+            update_interval_seconds = int(health_minutes * 60)
+            
+            # Get vehicle interval for health reports
+            vehicle_interval_seconds = config_entry.options.get(
+                CONF_HEALTH_VEHICLE_INTERVAL,
+                config_entry.data.get(CONF_HEALTH_VEHICLE_INTERVAL, DEFAULT_HEALTH_VEHICLE_INTERVAL)
+            )
+            
+            # Store for use during updates
+            self.vehicle_interval = vehicle_interval_seconds
+            self.endpoint_interval = config_entry.options.get(
+                CONF_ENDPOINT_INTERVAL,
+                config_entry.data.get(CONF_ENDPOINT_INTERVAL, DEFAULT_ENDPOINT_INTERVAL)
+            )
+            
+            super().__init__(
+                hass,
+                _LOGGER,
+                name=f"{DOMAIN}_health_reports",
+                update_interval=timedelta(seconds=update_interval_seconds),
+            )
+            
+            self.data = {}  # Initialize with empty data structure
+            # Keep track of consecutive failures per vehicle
+            self.vehicle_failures = {}
+            # Keep record of last successful health report per vehicle
+            self.last_successful_reports = {}
 
-            try: # Include try-except block for error handling (similar to other methods)
-                return await self._make_request( # Use self._make_request, which is in this class
-                    "POST",
-                    api_url,
-                    headers=headers,
-                    json=data
-                )
-            except MazdaAPIError as error: # Catch MazdaAPIError
-                _LOGGER.warning(f"API error fetching health report for {vehicle.vin}: {error}") # Log warning with VIN
-                return None # Return None on error
+        async def _async_update_data(self):
+            """Fetch health report data from the Mazda API."""
+            try:
+                # Start with existing data - we'll update it as we process
+                # This ensures we keep old data when new requests fail
+                result = self.data.copy() if self.data else {}
+                
+                # Get list of vehicles
+                try:
+                    vehicles = await self.client.get_vehicles()
+                    if not vehicles:
+                        _LOGGER.error("No vehicles returned from API")
+                        # Return existing data rather than failing completely
+                        return result
+                except Exception as vehicle_ex:
+                    _LOGGER.error("Failed to get vehicles list: %s", vehicle_ex)
+                    # Return what we have rather than failing completely
+                    return result
+                
+                # Process each vehicle
+                for index, vehicle in enumerate(vehicles):
+                    vin = vehicle["vin"]
+                    vehicle_id = vehicle["id"]
+                    
+                    # Add inter-vehicle delay after first vehicle
+                    if index > 0 and self.vehicle_interval > 0:
+                        _LOGGER.debug("Waiting %.1fs between health report requests", 
+                                     self.vehicle_interval)
+                        await asyncio.sleep(self.vehicle_interval)
+                    
+                    try:
+                        _LOGGER.debug("Requesting health report for VIN %s", vin)
+                        health_report = await with_timeout(
+                            self.client.get_health_report(vehicle_id),
+                            timeout_seconds=45
+                        )
+                        
+                        if health_report:
+                            # Check if we have a valid report with the expected structure
+                            if "resultCode" in health_report and health_report["resultCode"] == "200S00":
+                                _LOGGER.debug("Got health report for VIN %s", vin)
+                                result[vin] = health_report
+                                
+                                # Reset failure counter for successful requests
+                                self.vehicle_failures[vin] = 0
+                                
+                                # Store as last successful report
+                                self.last_successful_reports[vin] = health_report
+                            else:
+                                _LOGGER.warning("Health report for VIN %s has unexpected format: %s", 
+                                              vin, health_report.get("resultCode", "No resultCode"))
+                                
+                                # Use last successful report if available
+                                if vin in self.last_successful_reports:
+                                    _LOGGER.info("Using cached health report for VIN %s", vin)
+                                    result[vin] = self.last_successful_reports[vin]
+                                else:
+                                    # Increment failure counter
+                                    self.vehicle_failures[vin] = self.vehicle_failures.get(vin, 0) + 1
+                        else:
+                            _LOGGER.warning("Empty health report for VIN %s", vin)
+                            
+                            # Use last successful report if available
+                            if vin in self.last_successful_reports:
+                                _LOGGER.info("Using cached health report for VIN %s", vin)
+                                result[vin] = self.last_successful_reports[vin]
+                            else:
+                                # Increment failure counter
+                                self.vehicle_failures[vin] = self.vehicle_failures.get(vin, 0) + 1
+                                
+                    except asyncio.TimeoutError:
+                        _LOGGER.error("Timeout getting health report for VIN %s", vin)
+                        # Increment failure counter
+                        self.vehicle_failures[vin] = self.vehicle_failures.get(vin, 0) + 1
+                        
+                        # Use last successful report if available
+                        if vin in self.last_successful_reports:
+                            _LOGGER.info("Using cached health report for VIN %s", vin)
+                            result[vin] = self.last_successful_reports[vin]
+                    except MazdaException as mazda_ex:
+                        _LOGGER.error("Mazda API error for VIN %s: %s", vin, mazda_ex)
+                        # Increment failure counter
+                        self.vehicle_failures[vin] = self.vehicle_failures.get(vin, 0) + 1
+                        
+                        # Use last successful report if available
+                        if vin in self.last_successful_reports:
+                            _LOGGER.info("Using cached health report for VIN %s", vin)
+                            result[vin] = self.last_successful_reports[vin]
+                    except Exception as ex:
+                        _LOGGER.error("Error getting health report for VIN %s: %s", 
+                                     vin, ex)
+                        # Increment failure counter
+                        self.vehicle_failures[vin] = self.vehicle_failures.get(vin, 0) + 1
+                        
+                        # Use last successful report if available
+                        if vin in self.last_successful_reports:
+                            _LOGGER.info("Using cached health report for VIN %s", vin)
+                            result[vin] = self.last_successful_reports[vin]
+                
+                # Check if any vehicles were processed successfully
+                if not result:
+                    _LOGGER.warning("No health reports available for any vehicles")
+                    raise UpdateFailed("Failed to get health report for any vehicle")
+                
+                # Log vehicle failure statistics
+                for vin, failures in self.vehicle_failures.items():
+                    if failures > 0:
+                        _LOGGER.warning("VIN %s has %d consecutive health report failures", 
+                                      vin, failures)
+                
+                return result
+            except MazdaAuthenticationException as ex:
+                raise ConfigEntryAuthFailed(f"Authentication failed: {ex}") from ex
+            except UpdateFailed:
+                # Re-raise UpdateFailed exceptions
+                raise
+            except Exception as ex:
+                _LOGGER.error("Unexpected error in health report coordinator: %s", ex)
+                # Return existing data on unexpected errors to prevent losing all data
+                return self.data if self.data else {}
 
-    coordinator = MazdaDataUpdateCoordinator(hass, mazda_client, entry)
-
-    hass.data.setdefault(DOMAIN, {})
+    coordinator = MazdaVehicleUpdateCoordinator(hass, client, entry)
+    
+    health_coordinator = MazdaHealthUpdateCoordinator(hass, client, entry)
+    
     hass.data[DOMAIN][entry.entry_id] = {
-        DATA_CLIENT: mazda_client,
+        DATA_CLIENT: client,
         DATA_COORDINATOR: coordinator,
+        DATA_HEALTH_COORDINATOR: health_coordinator,
+        DATA_EMAIL: email,
+        DATA_PASSWORD: password,
         DATA_REGION: region,
         DATA_VEHICLES: [],
     }
 
-    # Fetch initial data so we have data when entities subscribe
-    await coordinator.async_config_entry_first_refresh()
+    # Force refresh coordinators to get initial data
+    await coordinator.async_refresh()
+    await health_coordinator.async_refresh()
 
-    # Setup components
+    # Store vehicle information for use by platform components
+    hass.data[DOMAIN][entry.entry_id][DATA_VEHICLES] = coordinator.data
+    
+    # Create device registry
+    dev_reg = dr.async_get(hass)
+    for vehicle in coordinator.data:
+        _LOGGER.debug(f"Registering device for vehicle VIN {vehicle['vin']}")
+        dev_reg.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, vehicle["vin"])},
+            manufacturer="Mazda",
+            model=f"{vehicle['modelYear']} {vehicle['carlineName']}",
+            name=vehicle.get("nickname", f"{vehicle['modelYear']} {vehicle['carlineName']}"),
+        )
+
+    # Forward the setup to platform modules
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register services
     hass.services.async_register(
-        DOMAIN,
-        "send_poi",
-        async_handle_service_call,
-        schema=service_schema_send_poi,
+        DOMAIN, "send_poi", async_handle_service_call, schema=service_schema_send_poi
+    )
+    
+    # Register the command status check service
+    hass.services.async_register(
+        DOMAIN, "check_command_status", handle_check_command_status, 
+        schema=service_schema_check_command_status
     )
 
     return True
 
 
+async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Update options."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Handle options update."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    # Display performance metrics before unloading if enabled
+    if entry.options.get(CONF_ENABLE_METRICS, False) and DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
+        if DATA_CLIENT in hass.data[DOMAIN][entry.entry_id]:
+            client = hass.data[DOMAIN][entry.entry_id][DATA_CLIENT]
+            if hasattr(client, "performance_metrics") and client.performance_metrics:
+                metrics = client.performance_metrics
+                _LOGGER.info("Mazda API Performance Metrics:")
+                for endpoint, data in metrics.items():
+                    if "count" in data and data["count"] > 0:
+                        avg_time = data.get("total_time", 0) / data["count"]
+                        _LOGGER.info(
+                            "Endpoint %s: %d calls, avg %.2f sec, min %.2f sec, max %.2f sec",
+                            endpoint,
+                            data["count"],
+                            avg_time,
+                            data.get("min_time", 0),
+                            data.get("max_time", 0),
+                        )
+    
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     # Only remove services if it is the last config entry
     if len(hass.data[DOMAIN]) == 1:
         hass.services.async_remove(DOMAIN, "send_poi")
+        hass.services.async_remove(DOMAIN, "check_command_status")
 
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
@@ -346,11 +696,15 @@ class MazdaEntity(CoordinatorEntity):
             self.data.get("carlineName", "Unknown")
         )
 
+        # Ensure proper device linkage
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self.vin)},
             manufacturer="Mazda",
-            model=f"{self.data['modelYear']} {self.data['carlineName']}",
+            model=f"{self.data.get('modelYear', '')} {self.data.get('carlineName', '')}",
             name=self.vehicle_name,
+            hw_version=self.data.get("hdopVersion", ""),
+            sw_version=self.data.get("swVersion", ""),
+            configuration_url="https://www.mazdausa.com/owners/my-mazda-connected-services",
         )
 
     @property

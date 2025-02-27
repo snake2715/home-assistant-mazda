@@ -1,6 +1,8 @@
 import datetime  # noqa: D100
 import json
 import logging
+import time
+import asyncio
 
 from .controller import Controller
 from .exceptions import MazdaConfigException
@@ -10,189 +12,364 @@ _LOGGER = logging.getLogger(__name__)
 
 class Client:  # noqa: D101
     def __init__(  # noqa: D107
-        self, email, password, region, websession=None, use_cached_vehicle_list=False
+        self, 
+        email, 
+        password, 
+        region, 
+        websession=None, 
+        use_cached_vehicle_list=False,
+        vehicle_interval=2,
+        endpoint_interval=1,
+        log_api_responses=False,
+        performance_metrics=None
     ):
         if email is None or len(email) == 0:
             raise MazdaConfigException("Invalid or missing email address")
         if password is None or len(password) == 0:
             raise MazdaConfigException("Invalid or missing password")
 
-        self.controller = Controller(email, password, region, websession)
+        self.controller = Controller(
+            email, 
+            password, 
+            region, 
+            websession,
+            log_api_responses=log_api_responses
+        )
 
         self._cached_state = {}
         self._use_cached_vehicle_list = use_cached_vehicle_list
         self._cached_vehicle_list = None
+        self._vehicle_delay = vehicle_interval
+        self._endpoint_delay = endpoint_interval
+        self._log_api_responses = log_api_responses
+        self.performance_metrics = performance_metrics
 
     async def validate_credentials(self):  # noqa: D102
         await self.controller.login()
 
+    async def test_authentication(self, detailed_diagnostics=True):
+        """Test authentication and return diagnostics.
+        
+        This method attempts to log in and provides detailed information about
+        any authentication issues encountered.
+        
+        Args:
+            detailed_diagnostics: Whether to return detailed diagnostic information
+            
+        Returns:
+            dict: Authentication test results including success status and diagnostics
+        """
+        result = {
+            "success": False,
+            "message": "",
+            "details": {}
+        }
+        
+        try:
+            # Try login with expanded error handling
+            await self.controller.login()
+            
+            # If we got here, login was successful
+            result["success"] = True
+            result["message"] = "Authentication successful"
+            
+            if detailed_diagnostics:
+                # Include some basic details about the connection
+                result["details"]["email_length"] = len(self.controller.connection.email)
+                result["details"]["email_has_spaces"] = " " in self.controller.connection.email
+                
+                # Get vehicles to test token validity
+                try:
+                    vehicles = await self.get_vehicles()
+                    result["details"]["vehicles_found"] = len(vehicles)
+                except Exception as ex:
+                    result["details"]["vehicle_fetch_error"] = str(ex)
+            
+        except Exception as ex:
+            # Authentication failed
+            result["success"] = False
+            result["message"] = f"Authentication failed: {str(ex)}"
+            
+            if detailed_diagnostics:
+                # Include diagnostic information
+                result["details"]["exception_type"] = type(ex).__name__
+                result["details"]["email_length"] = len(self.controller.connection.email)
+                result["details"]["email_has_spaces"] = " " in self.controller.connection.email
+                
+                # Check for common issues
+                if " " in self.controller.connection.email:
+                    result["details"]["suggestion"] = "Email contains spaces. Try removing spaces and attempt login again."
+                elif len(self.controller.connection.password) < 8:
+                    result["details"]["suggestion"] = "Password seems too short. Make sure you entered the correct password."
+                else:
+                    result["details"]["suggestion"] = "Try manually typing your credentials instead of copy-pasting. Check for typos and ensure you're using the correct region."
+        
+        return result
+
     async def get_vehicles(self):  # noqa: D102
+        """Get information about all Mazda vehicles linked to the account.
+        
+        Returns:
+            list: A list of vehicle information dictionaries
+        """
+        start_time = time.time() if self.performance_metrics is not None else None
+        
+        # Use cached vehicle list if enabled and available
         if self._use_cached_vehicle_list and self._cached_vehicle_list is not None:
             return self._cached_vehicle_list
+            
+        try:
+            vec_base_infos_response = await self.controller.get_vec_base_infos()
 
-        vec_base_infos_response = await self.controller.get_vec_base_infos()
+            vehicles = []
+            for i, current_vec_base_info in enumerate(
+                vec_base_infos_response.get("vecBaseInfos")
+            ):
+                current_vehicle_flags = vec_base_infos_response.get("vehicleFlags")[i]
 
-        vehicles = []
-        for i, current_vec_base_info in enumerate(
-            vec_base_infos_response.get("vecBaseInfos")
-        ):
-            current_vehicle_flags = vec_base_infos_response.get("vehicleFlags")[i]
+                # Ignore vehicles which are not enrolled in Mazda Connected Services
+                if current_vehicle_flags.get("vinRegistStatus") != 3:
+                    continue
 
-            # Ignore vehicles which are not enrolled in Mazda Connected Services
-            if current_vehicle_flags.get("vinRegistStatus") != 3:
-                continue
-
-            other_veh_info = json.loads(
-                current_vec_base_info.get("Vehicle").get("vehicleInformation")
-            )
-
-            nickname = await self.controller.get_nickname(
-                current_vec_base_info.get("vin")
-            )
-
-            vehicle = {
-                "vin": current_vec_base_info.get("vin"),
-                "id": current_vec_base_info.get("Vehicle", {})
-                .get("CvInformation", {})
-                .get("internalVin"),
-                "nickname": nickname,
-                "carlineCode": other_veh_info.get("OtherInformation", {}).get(
-                    "carlineCode"
-                ),
-                "carlineName": other_veh_info.get("OtherInformation", {}).get(
-                    "carlineName"
-                ),
-                "modelYear": other_veh_info.get("OtherInformation", {}).get(
-                    "modelYear"
-                ),
-                "modelCode": other_veh_info.get("OtherInformation", {}).get(
-                    "modelCode"
-                ),
-                "modelName": other_veh_info.get("OtherInformation", {}).get(
-                    "modelName"
-                ),
-                "automaticTransmission": other_veh_info.get("OtherInformation", {}).get(
-                    "transmissionType"
+                other_veh_info = json.loads(
+                    current_vec_base_info.get("Vehicle").get("vehicleInformation")
                 )
-                == "A",
-                "interiorColorCode": other_veh_info.get("OtherInformation", {}).get(
-                    "interiorColorCode"
-                ),
-                "interiorColorName": other_veh_info.get("OtherInformation", {}).get(
-                    "interiorColorName"
-                ),
-                "exteriorColorCode": other_veh_info.get("OtherInformation", {}).get(
-                    "exteriorColorCode"
-                ),
-                "exteriorColorName": other_veh_info.get("OtherInformation", {}).get(
-                    "exteriorColorName"
-                ),
-                "isElectric": current_vec_base_info.get("econnectType", 0) == 1,
-                "hasFuel": other_veh_info.get("CVServiceInformation", {}).get("fuelType", "00") != "05"
-            }
 
-            vehicles.append(vehicle)
+                nickname = await self.controller.get_nickname(
+                    current_vec_base_info.get("vin")
+                )
 
-        if self._use_cached_vehicle_list:
-            self._cached_vehicle_list = vehicles
-        return vehicles
+                vehicle = {
+                    "vin": current_vec_base_info.get("vin"),
+                    "id": current_vec_base_info.get("Vehicle", {})
+                    .get("CvInformation", {})
+                    .get("internalVin"),
+                    "nickname": nickname,
+                    "carlineCode": other_veh_info.get("OtherInformation", {}).get(
+                        "carlineCode"
+                    ),
+                    "carlineName": other_veh_info.get("OtherInformation", {}).get(
+                        "carlineName"
+                    ),
+                    "modelYear": other_veh_info.get("OtherInformation", {}).get(
+                        "modelYear"
+                    ),
+                    "modelCode": other_veh_info.get("OtherInformation", {}).get(
+                        "modelCode"
+                    ),
+                    "modelName": other_veh_info.get("OtherInformation", {}).get(
+                        "modelName"
+                    ),
+                    "automaticTransmission": other_veh_info.get("OtherInformation", {}).get(
+                        "transmissionType"
+                    )
+                    == "A",
+                    "interiorColorCode": other_veh_info.get("OtherInformation", {}).get(
+                        "interiorColorCode"
+                    ),
+                    "interiorColorName": other_veh_info.get("OtherInformation", {}).get(
+                        "interiorColorName"
+                    ),
+                    "exteriorColorCode": other_veh_info.get("OtherInformation", {}).get(
+                        "exteriorColorCode"
+                    ),
+                    "exteriorColorName": other_veh_info.get("OtherInformation", {}).get(
+                        "exteriorColorName"
+                    ),
+                    "isElectric": current_vec_base_info.get("econnectType", 0) == 1,
+                    "hasFuel": other_veh_info.get("CVServiceInformation", {}).get("fuelType", "00") != "05"
+                }
+
+                vehicles.append(vehicle)
+                
+            # Track performance metrics if enabled
+            if start_time is not None and self.performance_metrics is not None:
+                elapsed = time.time() - start_time
+                if "get_vehicles" not in self.performance_metrics:
+                    self.performance_metrics["get_vehicles"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
+                
+                self.performance_metrics["get_vehicles"]["count"] += 1
+                self.performance_metrics["get_vehicles"]["total_time"] += elapsed
+                self.performance_metrics["get_vehicles"]["min_time"] = min(self.performance_metrics["get_vehicles"]["min_time"], elapsed)
+                self.performance_metrics["get_vehicles"]["max_time"] = max(self.performance_metrics["get_vehicles"]["max_time"], elapsed)
+                
+                _LOGGER.debug("get_vehicles call completed in %.3f seconds", elapsed)
+
+            if self._use_cached_vehicle_list:
+                self._cached_vehicle_list = vehicles
+                
+            return vehicles
+            
+        except Exception as ex:
+            _LOGGER.error("Error getting vehicle list: %s", str(ex))
+            raise
 
     async def get_vehicle_status(self, vehicle_id):  # noqa: D102
-        response = await self.controller.get_vehicle_status(vehicle_id)
+        """Get the current status of a specific vehicle.
+        
+        Args:
+            vehicle_id: The Mazda vehicle ID to get status for
+            
+        Returns:
+            dict: The vehicle status information
+        """
+        start_time = time.time() if self.performance_metrics is not None else None
+        
+        try:
+            response = await self.controller.get_vehicle_status(vehicle_id)
 
-        if response is None or "alertInfos" not in response or not response["alertInfos"]:
-            _LOGGER.error(f"Invalid response received for VIN {vehicle_id}: {response}")
-            return None  # Handle the case where the response is empty
-
-        alert_info = response.get("alertInfos", [{}])[0]  # Use [{}] as a safe default
-        remote_info = response.get("remoteInfos", [{}])[0]
-
-        latitude = remote_info.get("PositionInfo", {}).get("Latitude")
-        if latitude is not None:
-            latitude = latitude * (
-                -1 if remote_info.get("PositionInfo", {}).get("LatitudeFlag") == 1 else 1
-            )
-        longitude = remote_info.get("PositionInfo", {}).get("Longitude")
-        if longitude is not None:
-            longitude = longitude * (
-                1 if remote_info.get("PositionInfo", {}).get("LongitudeFlag") == 1 else -1
-            )
-
-        vehicle_status = {
-            "lastUpdatedTimestamp": alert_info.get("OccurrenceDate"),
-            "latitude": latitude,
-            "longitude": longitude,
-            "positionTimestamp": remote_info.get("PositionInfo", {}).get(
-                "AcquisitionDatetime"
-            ),
-            "fuelRemainingPercent": remote_info.get("ResidualFuel", {}).get(
-                "FuelSegementDActl"
-            ),
-            "fuelDistanceRemainingKm": remote_info.get("ResidualFuel", {}).get(
-                "RemDrvDistDActlKm"
-            ),
-            "odometerKm": remote_info.get("DriveInformation", {}).get("OdoDispValue"),
-            "doors": {
-                "driverDoorOpen": alert_info.get("Door", {}).get("DrStatDrv") == 1,
-                "passengerDoorOpen": alert_info.get("Door", {}).get("DrStatPsngr") == 1,
-                "rearLeftDoorOpen": alert_info.get("Door", {}).get("DrStatRl") == 1,
-                "rearRightDoorOpen": alert_info.get("Door", {}).get("DrStatRr") == 1,
-                "trunkOpen": alert_info.get("Door", {}).get("DrStatTrnkLg") == 1,
-                "hoodOpen": alert_info.get("Door", {}).get("DrStatHood") == 1,
-                "fuelLidOpen": alert_info.get("Door", {}).get("FuelLidOpenStatus") == 1,
-            },
-            "doorLocks": {
-                "driverDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwDrv") == 1,
-                "passengerDoorUnlocked": alert_info.get("Door", {}).get(
-                    "LockLinkSwPsngr"
+            if response is None or "alertInfos" not in response or not response["alertInfos"]:
+                _LOGGER.error(f"Invalid response received for VIN {vehicle_id}: {response}")
+                return None  # Handle the case where the response is empty
+            
+            alert_info = response.get("alertInfos", [{}])[0]  # Use [{}] as a safe default
+            remote_info = response.get("remoteInfos", [{}])[0]
+            
+            latitude = remote_info.get("PositionInfo", {}).get("Latitude")
+            if latitude is not None:
+                latitude = latitude * (
+                    -1 if remote_info.get("PositionInfo", {}).get("LatitudeFlag") == 1 else 1
                 )
-                == 1,
-                "rearLeftDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwRl") == 1,
-                "rearRightDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwRr")
-                == 1,
-            },
-            "windows": {
-                "driverWindowOpen": alert_info.get("Pw", {}).get("PwPosDrv") == 1,
-                "passengerWindowOpen": alert_info.get("Pw", {}).get("PwPosPsngr") == 1,
-                "rearLeftWindowOpen": alert_info.get("Pw", {}).get("PwPosRl") == 1,
-                "rearRightWindowOpen": alert_info.get("Pw", {}).get("PwPosRr") == 1,
-            },
-            "hazardLightsOn": alert_info.get("HazardLamp", {}).get("HazardSw") == 1,
-            "tirePressure": {
-                "frontLeftTirePressurePsi": remote_info.get("TPMSInformation", {}).get(
-                    "FLTPrsDispPsi"
+            longitude = remote_info.get("PositionInfo", {}).get("Longitude")
+            if longitude is not None:
+                longitude = longitude * (
+                    1 if remote_info.get("PositionInfo", {}).get("LongitudeFlag") == 1 else -1
+                )
+            
+            vehicle_status = {
+                "lastUpdatedTimestamp": alert_info.get("OccurrenceDate"),
+                "latitude": latitude,
+                "longitude": longitude,
+                "positionTimestamp": remote_info.get("PositionInfo", {}).get(
+                    "AcquisitionDatetime"
                 ),
-                "frontRightTirePressurePsi": remote_info.get("TPMSInformation", {}).get(
-                    "FRTPrsDispPsi"
+                "fuelRemainingPercent": remote_info.get("ResidualFuel", {}).get(
+                    "FuelSegementDActl"
                 ),
-                "rearLeftTirePressurePsi": remote_info.get("TPMSInformation", {}).get(
-                    "RLTPrsDispPsi"
+                "fuelDistanceRemainingKm": remote_info.get("ResidualFuel", {}).get(
+                    "RemDrvDistDActlKm"
                 ),
-                "rearRightTirePressurePsi": remote_info.get("TPMSInformation", {}).get(
-                    "RRTPrsDispPsi"
-                ),
-            },
-        }
+                "odometerKm": remote_info.get("DriveInformation", {}).get("OdoDispValue"),
+                "doors": {
+                    "driverDoorOpen": alert_info.get("Door", {}).get("DrStatDrv") == 1,
+                    "passengerDoorOpen": alert_info.get("Door", {}).get("DrStatPsngr") == 1,
+                    "rearLeftDoorOpen": alert_info.get("Door", {}).get("DrStatRl") == 1,
+                    "rearRightDoorOpen": alert_info.get("Door", {}).get("DrStatRr") == 1,
+                    "trunkOpen": alert_info.get("Door", {}).get("DrStatTrnkLg") == 1,
+                    "hoodOpen": alert_info.get("Door", {}).get("DrStatHood") == 1,
+                    "fuelLidOpen": alert_info.get("Door", {}).get("FuelLidOpenStatus") == 1,
+                },
+                "doorLocks": {
+                    "driverDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwDrv") == 1,
+                    "passengerDoorUnlocked": alert_info.get("Door", {}).get(
+                        "LockLinkSwPsngr"
+                    )
+                    == 1,
+                    "rearLeftDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwRl") == 1,
+                    "rearRightDoorUnlocked": alert_info.get("Door", {}).get("LockLinkSwRr")
+                    == 1,
+                },
+                "windows": {
+                    "driverWindowOpen": alert_info.get("Pw", {}).get("PwPosDrv") == 1,
+                    "passengerWindowOpen": alert_info.get("Pw", {}).get("PwPosPsngr") == 1,
+                    "rearLeftWindowOpen": alert_info.get("Pw", {}).get("PwPosRl") == 1,
+                    "rearRightWindowOpen": alert_info.get("Pw", {}).get("PwPosRr") == 1,
+                },
+                "hazardLightsOn": alert_info.get("HazardLamp", {}).get("HazardSw") == 1,
+                "tirePressure": {
+                    "frontLeftTirePressurePsi": remote_info.get("TPMSInformation", {}).get(
+                        "FLTPrsDispPsi"
+                    ),
+                    "frontRightTirePressurePsi": remote_info.get("TPMSInformation", {}).get(
+                        "FRTPrsDispPsi"
+                    ),
+                    "rearLeftTirePressurePsi": remote_info.get("TPMSInformation", {}).get(
+                        "RLTPrsDispPsi"
+                    ),
+                    "rearRightTirePressurePsi": remote_info.get("TPMSInformation", {}).get(
+                        "RRTPrsDispPsi"
+                    ),
+                },
+            }
+            
+            door_lock_status = vehicle_status["doorLocks"]
+            lock_value = not (
+                door_lock_status["driverDoorUnlocked"]
+                or door_lock_status["passengerDoorUnlocked"]
+                or door_lock_status["rearLeftDoorUnlocked"]
+                or door_lock_status["rearRightDoorUnlocked"]
+            )
+            
+            self.__save_api_value(
+                vehicle_id,
+                "lock_state",
+                lock_value,
+                datetime.datetime.strptime(
+                    vehicle_status["lastUpdatedTimestamp"], "%Y%m%d%H%M%S"
+                ).replace(tzinfo=datetime.UTC),
+            )
+            
+            # Track performance metrics if enabled
+            if start_time is not None and self.performance_metrics is not None:
+                elapsed = time.time() - start_time
+                if "get_vehicle_status" not in self.performance_metrics:
+                    self.performance_metrics["get_vehicle_status"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
+                
+                self.performance_metrics["get_vehicle_status"]["count"] += 1
+                self.performance_metrics["get_vehicle_status"]["total_time"] += elapsed
+                self.performance_metrics["get_vehicle_status"]["min_time"] = min(self.performance_metrics["get_vehicle_status"]["min_time"], elapsed)
+                self.performance_metrics["get_vehicle_status"]["max_time"] = max(self.performance_metrics["get_vehicle_status"]["max_time"], elapsed)
+                
+                _LOGGER.debug("get_vehicle_status call completed in %.3f seconds", elapsed)
+                
+            # Add delay between endpoint calls if configured
+            if self._endpoint_delay > 0:
+                _LOGGER.debug("Sleeping for %d seconds between API endpoint calls", self._endpoint_delay)
+                await asyncio.sleep(self._endpoint_delay)
+                
+            return vehicle_status
+            
+        except Exception as ex:
+            _LOGGER.error("Error getting vehicle status for %s: %s", vehicle_id, str(ex))
+            raise
 
-        door_lock_status = vehicle_status["doorLocks"]
-        lock_value = not (
-            door_lock_status["driverDoorUnlocked"]
-            or door_lock_status["passengerDoorUnlocked"]
-            or door_lock_status["rearLeftDoorUnlocked"]
-            or door_lock_status["rearRightDoorUnlocked"]
-        )
-
-        self.__save_api_value(
-            vehicle_id,
-            "lock_state",
-            lock_value,
-            datetime.datetime.strptime(
-                vehicle_status["lastUpdatedTimestamp"], "%Y%m%d%H%M%S"
-            ).replace(tzinfo=datetime.UTC),
-        )
-
-        return vehicle_status
-
+    async def get_health_reports(self, vehicle_id):  # noqa: D102
+        """Get health reports for a specific vehicle.
+        
+        Args:
+            vehicle_id: The Mazda vehicle ID to get health reports for
+            
+        Returns:
+            list: A list of health report information
+        """
+        start_time = time.time() if self.performance_metrics is not None else None
+        
+        try:
+            response = await self.controller.get_health_reports(vehicle_id)
+            
+            # Track performance metrics if enabled
+            if start_time is not None and self.performance_metrics is not None:
+                elapsed = time.time() - start_time
+                if "get_health_reports" not in self.performance_metrics:
+                    self.performance_metrics["get_health_reports"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
+                
+                self.performance_metrics["get_health_reports"]["count"] += 1
+                self.performance_metrics["get_health_reports"]["total_time"] += elapsed
+                self.performance_metrics["get_health_reports"]["min_time"] = min(self.performance_metrics["get_health_reports"]["min_time"], elapsed)
+                self.performance_metrics["get_health_reports"]["max_time"] = max(self.performance_metrics["get_health_reports"]["max_time"], elapsed)
+                
+                _LOGGER.debug("get_health_reports call completed in %.3f seconds", elapsed)
+                
+            # Add delay between endpoint calls if configured
+            if self._endpoint_delay > 0:
+                _LOGGER.debug("Sleeping for %d seconds between API endpoint calls", self._endpoint_delay)
+                await asyncio.sleep(self._endpoint_delay)
+                
+            return response
+            
+        except Exception as ex:
+            _LOGGER.error("Error getting health reports for %s: %s", vehicle_id, str(ex))
+            raise
 
     async def get_ev_vehicle_status(self, vehicle_id):  # noqa: D102
         ev_vehicle_status_response = await self.controller.get_ev_vehicle_status(
@@ -235,6 +412,18 @@ class Client:  # noqa: D101
         )
 
         return ev_vehicle_status
+
+    async def get_health_report(self, vehicle_id):  # noqa: D102
+        """Get the health report for a vehicle.
+        
+        This may include different sensors for different vehicle models.
+        """
+        try:
+            report = await self.controller.get_health_report(vehicle_id)
+            return report
+        except Exception as ex:
+            _LOGGER.error("Error retrieving health report for vehicle %s: %s", vehicle_id, ex)
+            return None
 
     def get_assumed_lock_state(self, vehicle_id):  # noqa: D102
         return self.__get_assumed_value(

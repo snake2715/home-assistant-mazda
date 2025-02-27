@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -18,8 +19,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 
 from . import MazdaEntity
-from .const import DATA_CLIENT, DATA_COORDINATOR, DOMAIN
+from .const import DATA_CLIENT, DATA_COORDINATOR, DATA_HEALTH_COORDINATOR, DOMAIN
 
+_LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class MazdaSensorRequiredKeysMixin:
@@ -43,65 +45,130 @@ class MazdaSensorEntityDescription(
 
 def _fuel_remaining_percentage_supported(data):
     """Determine if fuel remaining percentage is supported."""
+    if data is None or "isElectric" not in data:
+        return False
+    
+    if data.get("status") is None:
+        return False
+        
     return (not data["isElectric"]) and (
+        "fuelRemainingPercent" in data["status"] and
         data["status"]["fuelRemainingPercent"] is not None
     )
 
 
 def _fuel_distance_remaining_supported(data):
     """Determine if fuel distance remaining is supported."""
+    if data is None or "isElectric" not in data:
+        return False
+    
+    if data.get("status") is None:
+        return False
+        
     return (not data["isElectric"]) and (
-        data["status"]["fuelDistanceRemainingKm"] is not None
+        data.get("status", {}).get("fuelDistanceRemainingKm") is not None
     )
 
 
 def _front_left_tire_pressure_supported(data):
     """Determine if front left tire pressure is supported."""
-    return data["status"]["tirePressure"]["frontLeftTirePressurePsi"] is not None
+    if data is None or data.get("status") is None:
+        return False
+    
+    tire_pressure = data["status"].get("tirePressure")
+    if tire_pressure is None:
+        return False
+        
+    return "frontLeftTirePressurePsi" in tire_pressure and tire_pressure["frontLeftTirePressurePsi"] is not None
 
 
 def _front_right_tire_pressure_supported(data):
     """Determine if front right tire pressure is supported."""
-    return data["status"]["tirePressure"]["frontRightTirePressurePsi"] is not None
+    if data is None or data.get("status") is None:
+        return False
+    
+    tire_pressure = data["status"].get("tirePressure")
+    if tire_pressure is None:
+        return False
+        
+    return "frontRightTirePressurePsi" in tire_pressure and tire_pressure["frontRightTirePressurePsi"] is not None
 
 
 def _rear_left_tire_pressure_supported(data):
     """Determine if rear left tire pressure is supported."""
-    return data["status"]["tirePressure"]["rearLeftTirePressurePsi"] is not None
+    if data is None or data.get("status") is None:
+        return False
+    
+    tire_pressure = data["status"].get("tirePressure")
+    if tire_pressure is None:
+        return False
+        
+    return "rearLeftTirePressurePsi" in tire_pressure and tire_pressure["rearLeftTirePressurePsi"] is not None
 
 
 def _rear_right_tire_pressure_supported(data):
     """Determine if rear right tire pressure is supported."""
-    return data["status"]["tirePressure"]["rearRightTirePressurePsi"] is not None
+    if data is None or data.get("status") is None:
+        return False
+    
+    tire_pressure = data["status"].get("tirePressure")
+    if tire_pressure is None:
+        return False
+        
+    return "rearRightTirePressurePsi" in tire_pressure and tire_pressure["rearRightTirePressurePsi"] is not None
 
 
 def _ev_charge_level_supported(data):
     """Determine if charge level is supported."""
-    return (
-        data["isElectric"]
-        and data["evStatus"]["chargeInfo"]["batteryLevelPercentage"] is not None
-    )
+    if data is None or "isElectric" not in data:
+        return False
+        
+    if not data["isElectric"]:
+        return False
+        
+    if data.get("evStatus") is None or data["evStatus"].get("chargeInfo") is None:
+        return False
+        
+    return "batteryLevelPercentage" in data["evStatus"]["chargeInfo"] and data["evStatus"]["chargeInfo"]["batteryLevelPercentage"] is not None
 
 def _ev_remaining_charging_time_supported(data):
     """Determine if remaining changing time is supported."""
-    return (
-        data["isElectric"]
-        and data["evStatus"]["chargeInfo"]["basicChargeTimeMinutes"] is not None
-    )
+    if data is None or "isElectric" not in data:
+        return False
+        
+    if not data["isElectric"]:
+        return False
+        
+    if data.get("evStatus") is None or data["evStatus"].get("chargeInfo") is None:
+        return False
+        
+    return "basicChargeTimeMinutes" in data["evStatus"]["chargeInfo"] and data["evStatus"]["chargeInfo"]["basicChargeTimeMinutes"] is not None
 
 def _ev_remaining_range_supported(data):
     """Determine if remaining range is supported."""
-    return (
-        data["isElectric"]
-        and data["evStatus"]["chargeInfo"]["drivingRangeKm"] is not None
-    )
+    if data is None or "isElectric" not in data:
+        return False
+        
+    if not data["isElectric"]:
+        return False
+        
+    if data.get("evStatus") is None or data["evStatus"].get("chargeInfo") is None:
+        return False
+        
+    return "drivingRangeKm" in data["evStatus"]["chargeInfo"] and data["evStatus"]["chargeInfo"]["drivingRangeKm"] is not None
 
 def _ev_remaining_bev_range_supported(data):
     """Determine if remaining range bev is supported."""
-    return (
-        data["isElectric"]
-        and data["evStatus"]["chargeInfo"]["drivingRangeBevKm"] is not None
-    )
+    if data is None or "isElectric" not in data:
+        return False
+        
+    if not data["isElectric"]:
+        return False
+        
+    if data.get("evStatus") is None or data["evStatus"].get("chargeInfo") is None:
+        return False
+        
+    return "drivingRangeBevKm" in data["evStatus"]["chargeInfo"] and data["evStatus"]["chargeInfo"]["drivingRangeBevKm"] is not None
 
 def _fuel_distance_remaining_value(data):
     """Get the fuel distance remaining value."""
@@ -267,20 +334,47 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the sensor platform."""
+    """Set up the Mazda vehicle sensor platform."""
     client = hass.data[DOMAIN][config_entry.entry_id][DATA_CLIENT]
     coordinator = hass.data[DOMAIN][config_entry.entry_id][DATA_COORDINATOR]
 
-    entities: list[SensorEntity] = []
-
-    for index, data in enumerate(coordinator.data):
+    entities = []
+    
+    # Debug log to identify what we're seeing in the coordinator data
+    _LOGGER.debug(f"Setting up sensors with coordinator data: {coordinator.data}")
+    
+    # For each vehicle in the coordinator data
+    for index, vehicle in enumerate(coordinator.data):
+        vin = vehicle.get("vin")
+        _LOGGER.debug(f"Processing vehicle {index}: VIN={vin}, Name={vehicle.get('nickname', 'Unknown')}")
+        
+        # Check which sensors are supported for this vehicle
         for description in SENSOR_ENTITIES:
-            if description.is_supported(data):
+            if description.is_supported(vehicle):
+                _LOGGER.debug(f"Adding sensor {description.key} for vehicle {vin}")
                 entities.append(
-                    MazdaSensorEntity(client, coordinator, index, description)
+                    MazdaSensorEntity(
+                        client=client,
+                        coordinator=coordinator,
+                        index=index,
+                        description=description,
+                    )
                 )
+    
+    # If we have any entities, add them
+    if entities:
+        _LOGGER.info(f"Adding {len(entities)} Mazda sensor entities")
+        async_add_entities(entities)
+    else:
+        _LOGGER.warning("No Mazda sensors were created")
 
-    async_add_entities(entities)
+    # Also set up health sensors
+    if DATA_HEALTH_COORDINATOR in hass.data[DOMAIN][config_entry.entry_id]:
+        try:
+            from .health_sensor import async_setup_entry as async_setup_health_sensor
+            await async_setup_health_sensor(hass, config_entry, async_add_entities)
+        except Exception as ex:
+            _LOGGER.error("Failed to set up Mazda health sensors: %s", ex)
 
 
 class MazdaSensorEntity(MazdaEntity, SensorEntity):
