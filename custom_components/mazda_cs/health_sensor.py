@@ -8,6 +8,7 @@ import logging
 import traceback
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
+import re
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -28,7 +29,22 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DATA_CLIENT, DATA_COORDINATOR, DATA_HEALTH_COORDINATOR, DOMAIN
+from .const import (
+    DATA_CLIENT, 
+    DATA_COORDINATOR, 
+    DATA_HEALTH_COORDINATOR, 
+    DOMAIN, 
+    CONF_DISCOVERY_MODE,
+    VIN_PREFIX_MAZDA3,
+    VIN_PREFIX_CX30,
+    VIN_PREFIX_CX5,
+    MODEL_TEMPLATE_MAP,
+    DEFAULT_TEMPLATE,
+    GENERAL_HEALTH_TEMPLATE,
+    MAZDA3_HEALTH_TEMPLATE,
+    CX30_HEALTH_TEMPLATE,
+    CX5_HEALTH_TEMPLATE
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,841 +71,466 @@ SAMPLE_HEALTH_REPORT = {
     }
 }
 
+def print_discovery_paths(data, path=None, prefix=''):
+    """Print all possible paths in the health report for sensor discovery."""
+    if path is None:
+        path = []
+        
+    if isinstance(data, dict):
+        for key, value in data.items():
+            current_path = path + [key]
+            path_str = '.'.join(current_path)
+            
+            if isinstance(value, (dict, list)):
+                # For non-leaf nodes, print path and continue traversing
+                _LOGGER.warning(f"{prefix}Path: {path_str} (container)")
+                print_discovery_paths(value, current_path, prefix + '  ')
+            else:
+                # For leaf nodes, print path and value
+                value_str = str(value)
+                if len(value_str) > 50:
+                    value_str = value_str[:47] + "..."
+                _LOGGER.warning(f"{prefix}Path: {path_str} = {value_str} ({type(value).__name__})")
+    
+    elif isinstance(data, list):
+        # Handle lists - show example from first item if available
+        if data and isinstance(data[0], dict):
+            _LOGGER.warning(f"{prefix}Path: {'.'.join(path)} (list of objects, showing first item)")
+            print_discovery_paths(data[0], path, prefix + '  ')
+        elif data:
+            value_str = str(data[0])
+            if len(value_str) > 50:
+                value_str = value_str[:47] + "..."
+            _LOGGER.warning(f"{prefix}Path: {'.'.join(path)}[0] = {value_str} ({type(data[0]).__name__})")
+
+def _convert_entity_category(entity_category_str):
+    """Convert entity category string to EntityCategory enum."""
+    if entity_category_str == "diagnostic":
+        return EntityCategory.DIAGNOSTIC
+    elif entity_category_str == "config":
+        return EntityCategory.CONFIG
+    return None
+
 async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set up the Mazda Connected Services health sensors from config entry."""
     try:
-        _LOGGER.info("Setting up Mazda health sensors")
-        
-        # Check if health coordinator exists
-        if DATA_HEALTH_COORDINATOR not in hass.data[DOMAIN][config_entry.entry_id]:
-            _LOGGER.error("Health coordinator not found in hass.data for entry %s", config_entry.entry_id)
-            return
-            
+        client = hass.data[DOMAIN][config_entry.entry_id][DATA_CLIENT]
+        coordinator = hass.data[DOMAIN][config_entry.entry_id][DATA_COORDINATOR]
         health_coordinator = hass.data[DOMAIN][config_entry.entry_id][DATA_HEALTH_COORDINATOR]
         
-        _LOGGER.info("Health coordinator data: %s", 
-                     "Available" if health_coordinator.data else "Not available")
-        
-        # If we don't have data yet, try to use the coordinator's last_successful_reports instead
-        if not health_coordinator.data:
-            _LOGGER.warning("No health report data available in coordinator, checking cached data")
-            if hasattr(health_coordinator, 'last_successful_reports') and health_coordinator.last_successful_reports:
-                _LOGGER.info("Using cached last successful reports: %s vehicles", 
-                            len(health_coordinator.last_successful_reports))
-                health_coordinator.data = health_coordinator.last_successful_reports
-            else:
-                _LOGGER.warning("No health report data available for entry %s", config_entry.entry_id)
-                # Use sample data for testing entity setup
-                _LOGGER.info("Using sample health report for entity discovery")
-                # Get VIN from config entry
-                vin = config_entry.data.get("vehicle_id")
-                if vin:
-                    health_coordinator.data = {vin: SAMPLE_HEALTH_REPORT[list(SAMPLE_HEALTH_REPORT.keys())[0]]}
-                else:
-                    return
-        
-        _LOGGER.debug("Health coordinator data keys: %s", 
-                     list(health_coordinator.data.keys()) if isinstance(health_coordinator.data, dict) else "Not a dict")
+        # Check discovery mode
+        discovery_mode = config_entry.options.get(CONF_DISCOVERY_MODE, False)
         
         entities = []
         
         # Structure the health data properly for processing
         health_reports = {}
         
+        # If no health report data is available yet (due to deferred initialization),
+        # we'll still set up the entities with empty data. They will update when data arrives.
+        has_health_data = False
+        
         # Check if data is already in VIN-keyed format
-        if isinstance(health_coordinator.data, dict) and all(len(k) > 10 for k in health_coordinator.data.keys()):
+        if isinstance(health_coordinator.data, dict) and health_coordinator.data and all(len(k) > 10 for k in health_coordinator.data.keys()):
             # Data is already structured by VIN
             health_reports = health_coordinator.data
+            has_health_data = True
         else:
-            # Data might be a direct API response, check if it's a raw health report
-            if isinstance(health_coordinator.data, dict):
-                # Get VIN from config entry
-                vin = config_entry.data.get("vehicle_id")
-                if not vin:
-                    _LOGGER.warning("No vehicle ID found in config entry, cannot process health report")
-                    return
-                    
-                _LOGGER.debug("Using vehicle_id %s from config entry for health report", vin)
-                health_reports = {vin: health_coordinator.data}
+            # No health data yet or data might be a direct API response
+            # First, try to use vehicle info from the main coordinator to at least set up entities
+            if coordinator.data:
+                _LOGGER.info("Health report data not yet available. Setting up sensors with empty data.")
+                # Create empty health reports structure based on vehicle VINs
+                for vehicle in coordinator.data:
+                    vin = vehicle.get("vin")
+                    if vin:
+                        # Initialize with empty dict - will be populated on next update
+                        health_reports[vin] = {}
+            else:
+                # If we have no vehicle data either, we can't set up health sensors yet
+                _LOGGER.warning("No vehicle data available, deferring health sensor setup")
+                return
         
-        _LOGGER.info("Processing health reports for %d vehicles", len(health_reports))
+        if not health_reports:
+            _LOGGER.warning("No health report data yet and no vehicles found")
+            return
+            
+        _LOGGER.info(
+            "Setting up health sensors for %d vehicles. Has health data: %s", 
+            len(health_reports), 
+            has_health_data
+        )
         
         # For each vehicle that has a health report
         for vin, health_report in health_reports.items():
-            _LOGGER.info("Processing health report for vehicle with VIN: %s", vin)
+            _LOGGER.info("Processing health sensors for vehicle with VIN: %s", vin)
             
-            # Log the full health report structure at debug level to help with troubleshooting
-            _LOGGER.debug(
-                "Full health report structure for VIN %s: %s", 
-                vin,
-                json.dumps(health_report, indent=2, default=str)
-            )
+            # Try to get vehicle info from the coordinator
+            vehicle_info = None
+            vehicle_details = ""
+            vin_prefix = ""
+            if vin:
+                vin_prefix = vin[:8]  # Extract first 8 characters for model identification
+                
+            if coordinator.data:
+                for vehicle in coordinator.data:
+                    if vehicle.get("vin") == vin:
+                        vehicle_info = vehicle
+                        
+                        # Get vehicle details for logging
+                        nickname = vehicle.get("nickname", "")
+                        model_name = vehicle.get("carlineName", "Unknown")
+                        year = vehicle.get("modelYear", "")
+                        
+                        # Get car type info
+                        car_type = vehicle.get("carType", "").capitalize()
+                        if not car_type:
+                            if "cx" in model_name.lower():
+                                car_type = "SUV/Crossover"
+                            elif "mx" in model_name.lower():
+                                car_type = "Roadster"
+                            else:
+                                car_type = "Sedan"
+                        
+                        vehicle_details = f"{nickname} " if nickname else ""
+                        vehicle_details += f"({year} {model_name} - {car_type})"
+                        
+                        _LOGGER.info("Found vehicle details: %s", vehicle_details)
+                        break
+            
+            if has_health_data and health_report:
+                # Log the full health report structure at debug level to help with troubleshooting
+                if vehicle_details:
+                    _LOGGER.debug(
+                        "Full health report structure for %s: %s", 
+                        vehicle_details,
+                        json.dumps(health_report, indent=2, default=str)
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Full health report structure for VIN %s: %s", 
+                        vin,
+                        json.dumps(health_report, indent=2, default=str)
+                    )
             
             # Discover sensors from the health report
             sensors = []
             try:
-                sensors = discover_health_sensors(health_report)
-                
-                _LOGGER.info(
-                    "Discovered %d health sensors for vehicle %s", 
-                    len(sensors), 
-                    vin
-                )
-                
-                # Log the discovered sensors at debug level
-                for sensor in sensors:
-                    _LOGGER.debug(
-                        "Discovered health sensor: %s (key: %s, path: %s, unit: %s)", 
-                        sensor.name, 
-                        sensor.key, 
-                        sensor.path, 
-                        sensor.native_unit_of_measurement
-                    )
+                if has_health_data and health_report:
+                    if discovery_mode:
+                        # Log which car model has which sensors for easier templating
+                        if vehicle_details:
+                            _LOGGER.warning(
+                                "DISCOVERY MODE - Sensor paths for vehicle model: %s", 
+                                vehicle_details
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "DISCOVERY MODE - Sensor paths for VIN: %s", 
+                                vin
+                            )
+                        print_discovery_paths(health_report)
+                        
+                    # Get the appropriate template based on VIN prefix
+                    template_key = None
+                    template = None
                     
-            except Exception as ex:
-                _LOGGER.exception("Error discovering health sensors for VIN %s: %s", vin, ex)
+                    # Try to determine which template to use based on VIN prefix
+                    if vin_prefix:
+                        template_key = MODEL_TEMPLATE_MAP.get(vin_prefix)
+                        
+                        if template_key == "MAZDA3":
+                            template = MAZDA3_HEALTH_TEMPLATE
+                            _LOGGER.info("Using Mazda 3 template for VIN %s", vin)
+                        elif template_key == "CX30":
+                            template = CX30_HEALTH_TEMPLATE
+                            _LOGGER.info("Using CX-30 template for VIN %s", vin)
+                        elif template_key == "CX5":
+                            template = CX5_HEALTH_TEMPLATE
+                            _LOGGER.info("Using CX-5 template for VIN %s", vin)
+                    
+                    # If no specific template found, use general template
+                    if not template:
+                        template = GENERAL_HEALTH_TEMPLATE
+                        _LOGGER.info("Using general template for VIN %s (no specific model template found)", vin)
+                    
+                    # Process data within remoteInfos if present (new API format)
+                    if "remoteInfos" in health_report and isinstance(health_report["remoteInfos"], list) and health_report["remoteInfos"]:
+                        report_data = health_report["remoteInfos"][0]
+                        _LOGGER.info("Found remoteInfos data structure in health report")
+                    else:
+                        # Otherwise use the health report directly (may be pre-processed)
+                        report_data = health_report
+                    
+                    # Create sensors based on the template and available data
+                    for path, config in template.items():
+                        # Extract value using the path from template
+                        value = get_value_from_path(report_data, path)
+                        
+                        if value is not None or discovery_mode:
+                            # Create sensor with the extracted value
+                            name = config.get("name", path.split(".")[-1])
+                            
+                            # Determine if timestamp conversion is needed
+                            is_timestamp = False
+                            if config.get("device_class") == "timestamp" or any(ts_word in path.lower() for ts_word in ["date", "time", "occurrence"]):
+                                is_timestamp = True
+                            
+                            entity_category = _convert_entity_category(config.get("entity_category"))
+                            
+                            sensor = MazdaHealthSensor(
+                                health_coordinator,
+                                vin,
+                                path,  # Use path as unique identifier
+                                name,
+                                config.get("icon"),
+                                config.get("device_class"),
+                                config.get("state_class"),
+                                config.get("unit_of_measurement"),
+                                entity_category,
+                                config.get("options"),
+                                is_timestamp
+                            )
+                            sensors.append(sensor)
+                            
+                            if value is not None:
+                                _LOGGER.info(f"Created sensor '{name}' with value: {value}")
+                            else:
+                                _LOGGER.info(f"Created sensor '{name}' with no value yet")
+                
+                elif discovery_mode:
+                    # In discovery mode, create all sensors from all templates for testing
+                    _LOGGER.warning("DISCOVERY MODE - Creating all possible sensors for testing")
+                    
+                    # Combine all templates for testing
+                    combined_template = {}
+                    combined_template.update(GENERAL_HEALTH_TEMPLATE)
+                    combined_template.update(MAZDA3_HEALTH_TEMPLATE)
+                    combined_template.update(CX30_HEALTH_TEMPLATE)
+                    combined_template.update(CX5_HEALTH_TEMPLATE)
+                    
+                    for path, config in combined_template.items():
+                        name = config.get("name", path.split(".")[-1])
+                        
+                        # Determine if timestamp conversion is needed
+                        is_timestamp = False
+                        if config.get("device_class") == "timestamp" or any(ts_word in path.lower() for ts_word in ["date", "time", "occurrence"]):
+                            is_timestamp = True
+                        
+                        entity_category = _convert_entity_category(config.get("entity_category"))
+                        
+                        sensor = MazdaHealthSensor(
+                            health_coordinator,
+                            vin,
+                            path,  # Use path as unique identifier
+                            name,
+                            config.get("icon"),
+                            config.get("device_class"),
+                            config.get("state_class"),
+                            config.get("unit_of_measurement"),
+                            entity_category,
+                            config.get("options"),
+                            is_timestamp
+                        )
+                        sensors.append(sensor)
+                
+                else:
+                    _LOGGER.warning("No health report data available for VIN %s", vin)
+            
+            except Exception as e:
+                _LOGGER.error("Error processing health sensors for vehicle %s: %s", vin, e)
                 _LOGGER.error(traceback.format_exc())
-            
-            # Create entities for each sensor
-            for sensor_description in sensors:
-                try:
-                    entity = MazdaHealthSensor(
-                        health_coordinator,
-                        sensor_description,
-                        vin,
-                    )
-                    entities.append(entity)
-                except Exception as ex:
-                    _LOGGER.error("Error creating sensor entity for %s with path %s: %s",
-                                 sensor_description.name, sensor_description.path, ex)
-                    _LOGGER.debug(traceback.format_exc())
         
-        if not entities:
-            _LOGGER.warning("No health sensors discovered for any vehicle")
-            return
-            
-        _LOGGER.info("Adding %d health sensor entities", len(entities))
-        async_add_entities(entities)
-        
-    except Exception as ex:
-        _LOGGER.error("Error setting up Mazda health sensors: %s", ex)
+        # Add all discovered sensors
+        if sensors:
+            async_add_entities(sensors)
+        else:
+            _LOGGER.warning("No health sensors were discovered")
+    
+    except Exception as e:
+        _LOGGER.error("Error setting up Mazda health sensors: %s", e)
         _LOGGER.error(traceback.format_exc())
 
-
-@dataclass
-class MazdaHealthSensorEntityDescription(SensorEntityDescription):
-    """Describes a Mazda health report sensor entity."""
-
-    path: List[str] = None
-    transform_value: Optional[Callable[[Any], StateType]] = None
-
-
-def discover_health_sensors(health_report):
-    """Discover health report sensors in the nested structure."""
-    if not health_report:
-        _LOGGER.warning("Empty health report, no sensors to discover")
-        return []
-    
-    _LOGGER.debug("Health report top-level keys: %s", list(health_report.keys()))
-    
-    sensors = []
-    
-    # Check for common API response formats and process accordingly
-    if "remoteInfos" in health_report and isinstance(health_report["remoteInfos"], list):
-        _LOGGER.info("Found remoteInfos array in health report with %d items", 
-                     len(health_report["remoteInfos"]))
-        
-        # Process remoteInfos array
-        for item in health_report["remoteInfos"]:
-            traverse_dict(item, ["remoteInfos"], sensors)
-        
-        # Also process the parent object for any fields we missed
-        for key, value in health_report.items():
-            if key != "remoteInfos":
-                traverse_dict({key: value}, [], sensors)
-                
-    # Check for resultItems array structure (alternative Mazda API response format)
-    elif "resultItems" in health_report and isinstance(health_report["resultItems"], list):
-        _LOGGER.info("Found resultItems array in health report with %d items", 
-                     len(health_report["resultItems"]))
-        
-        # Process resultItems array
-        for item in health_report["resultItems"]:
-            traverse_dict(item, ["resultItems"], sensors)
-            
-        # Also process the parent object for any fields we missed
-        for key, value in health_report.items():
-            if key != "resultItems":
-                traverse_dict({key: value}, [], sensors)
-                
-    # Check for common structures in health report
-    elif any(key in health_report for key in ["TPMSInformation", "OilMntInformation", "RegularMntInformation"]):
-        _LOGGER.info("Found typical health report structure")
-        traverse_dict(health_report, [], sensors)
-        
-    # Check for result structure
-    elif "result" in health_report and isinstance(health_report["result"], dict):
-        _LOGGER.info("Found result dictionary in health report")
-        traverse_dict(health_report["result"], ["result"], sensors)
-        
-        # Also process the parent object for any fields we missed
-        for key, value in health_report.items():
-            if key != "result":
-                traverse_dict({key: value}, [], sensors)
-                
-    # Fallback for other formats - try to process everything
-    else:
-        _LOGGER.info("Processing health report as general dictionary")
-        traverse_dict(health_report, [], sensors)
-    
-    # Deduplicate sensors based on path
-    seen_paths = set()
-    unique_sensors = []
-    
-    for sensor in sensors:
-        path_key = str(sensor.path)
-        if path_key not in seen_paths:
-            seen_paths.add(path_key)
-            unique_sensors.append(sensor)
-    
-    # Log summary of discovered sensors
-    sensor_types = {}
-    sensor_names = [s.name for s in unique_sensors]
-    
-    for s in unique_sensors:
-        device_class = s.device_class or "generic"
-        if device_class in sensor_types:
-            sensor_types[device_class] += 1
-        else:
-            sensor_types[device_class] = 1
-    
-    _LOGGER.info("Discovered %d total sensors with types: %s", len(unique_sensors), dict(sensor_types))
-    _LOGGER.debug("Discovered sensor names: %s", sensor_names)
-    
-    return unique_sensors
-
-
-def traverse_dict(data, path, sensors):
-    """Traverse the health report dictionary and discover sensors."""
+def get_value_from_path(data, path):
+    """Get a value from a nested dictionary using a dot-separated path."""
     if not data:
-        return
-        
-    _LOGGER.debug("Traversing path: %s, Data type: %s", path, type(data))
-    
-    # Handle different data types appropriately
-    if isinstance(data, dict):
-        # Structure 1: remoteInfos array format from the API
-        if "remoteInfos" in data and isinstance(data["remoteInfos"], list):
-            _LOGGER.debug("Found remoteInfos array at path %s", path)
-            for item in data["remoteInfos"]:
-                traverse_dict(item, path + ["remoteInfos"], sensors)
-            
-            # Also process other keys at this level
-            for key, value in data.items():
-                if key != "remoteInfos":
-                    traverse_dict({key: value}, path, sensors)
-            return
-            
-        # Structure 2: resultItems array format from the API
-        if "resultItems" in data and isinstance(data["resultItems"], list):
-            _LOGGER.debug("Found resultItems array at path %s", path)
-            for item in data["resultItems"]:
-                traverse_dict(item, path + ["resultItems"], sensors)
-                
-            # Also process other keys at this level
-            for key, value in data.items():
-                if key != "resultItems":
-                    traverse_dict({key: value}, path, sensors)
-            return
-        
-        # Structure 3: Handle items with name/value pairs (common API format)
-        if "name" in data and "value" in data:
-            try:
-                name = data["name"]
-                value = data["value"]
-                units = data.get("unit", "")
-                
-                _LOGGER.debug("Found name/value pair: %s=%s%s", name, value, units)
-                
-                # Skip certain values that might not be useful as sensors
-                if name in ["id", "status", "timestamp"] or value == "":
-                    _LOGGER.debug("Skipping %s with value %s - not a useful sensor value", name, value)
-                    return
-                
-                # Create a sensor ID from the path and name
-                sensor_id = f"health_{'_'.join(str(p) for p in path)}_{name}".lower() if path else f"health_{name}".lower()
-                
-                sensors.append(
-                    MazdaHealthSensorEntityDescription(
-                        key=sensor_id,
-                        name=name.replace("_", " ").title(),
-                        path=path + [name],
-                        native_unit_of_measurement=units,
-                    )
-                )
-                return
-            except Exception as ex:
-                _LOGGER.warning("Error creating sensor from %s: %s", data, ex)
-                _LOGGER.debug(traceback.format_exc())
-                return
-        
-        # Special handling for TPMSInformation, OilMntInformation, and other known structures
-        special_sections = ["TPMSInformation", "OilMntInformation", "RegularMntInformation"]
-        has_special_section = False
-        
-        for section in special_sections:
-            if section in data and isinstance(data[section], dict):
-                has_special_section = True
-                new_path = path + [section]
-                _LOGGER.debug("Found special section %s, processing with path %s", section, new_path)
-                traverse_dict(data[section], new_path, sensors)
-        
-        # Check for warning keys (starting with "Wng")
-        wng_keys = [k for k in data.keys() if isinstance(k, str) and k.startswith("Wng")]
-        if wng_keys:
-            for wng_key in wng_keys:
-                value = data[wng_key]
-                if isinstance(value, (int, bool, float)) and wng_key not in ["WngTpmsStatus"]:
-                    # Create warning sensor
-                    sensor = create_sensor_description(path + [wng_key], value)
-                    if sensor:
-                        sensors.append(sensor)
-            
-        # If we processed special sections, don't process other top-level items to avoid duplication
-        if has_special_section and any(k in data for k in ["TPMSInformation", "OilMntInformation", "OdoDispValue"]):
-            # Still process some important top-level keys
-            for key in ["OdoDispValue", "OdoDispValueMile", "OccurrenceDate"]:
-                if key in data:
-                    sensor = create_sensor_description(path + [key], data[key])
-                    if sensor:
-                        sensors.append(sensor)
-                    
-            # Then skip further processing to avoid duplication
-            return
-        
-        # Structure 4: Regular nested dictionary
-        for key, value in data.items():
-            # Skip if null
-            if value is None:
-                continue
-                
-            new_path = path + [key]
-            
-            if isinstance(value, (dict, list)):
-                # Recurse into nested structures
-                traverse_dict(value, new_path, sensors)
-            elif isinstance(value, (int, float, str, bool)) and value != "":
-                # Found a leaf node with a value, create a sensor for it
-                _LOGGER.debug("Found leaf node with value at path: %s = %s", new_path, value)
-                sensor = create_sensor_description(new_path, value)
-                if sensor:
-                    sensors.append(sensor)
-    
-    # Handle list of items
-    elif isinstance(data, list):
-        _LOGGER.debug("Processing list with %d items at path %s", len(data), path)
-        
-        # For each item in the list
-        for i, item in enumerate(data):
-            if isinstance(item, dict):
-                # For dictionaries within lists, just add the item index to the path for clarity
-                item_path = path + [f"item{i}"]
-                traverse_dict(item, item_path, sensors)
-            elif isinstance(item, list):
-                # For nested lists, also add the item index
-                item_path = path + [f"item{i}"]
-                traverse_dict(item, item_path, sensors)
-            elif isinstance(item, (int, float, str, bool)) and item != "":
-                # For primitive values in a list, create a sensor with the list index
-                item_path = path + [f"item{i}"]
-                sensor = create_sensor_description(item_path, item)
-                if sensor:
-                    sensors.append(sensor)
-
-
-def create_sensor_description(path, value):
-    """Create a sensor description from a leaf node value."""
-    # Skip empty values
-    if value == "" or value is None:
         return None
     
-    # Ensure all path components are strings for joining
-    path_parts = [str(p) for p in path]
-    
-    # Join the path to create a key and name
-    key = f"health_{'_'.join(path_parts)}".lower()
-    
-    # Use the last path segment as the name
-    if path_parts:
-        name = path_parts[-1].replace("_", " ").title()
-        # If name starts with "item", use the parent path element + index
-        if name.startswith("Item") and len(path_parts) > 1:
-            parent_name = path_parts[-2].replace("_", " ").title()
-            name = f"{parent_name} {name}"
-    else:
-        name = "Unknown"
-    
-    _LOGGER.debug("Creating sensor from path %s with value %s", path, value)
-    
-    # Default description with no special handling
-    description = MazdaHealthSensorEntityDescription(
-        key=key,
-        name=name,
-        path=path,
-    )
-    
-    # Special handling based on path and value
-    last_segment = path_parts[-1] if path_parts else ""
-    
-    # Log details about the value type and key being processed
-    _LOGGER.debug(
-        "Processing value: %s (type: %s) with key: %s, last_segment: %s", 
-        value, 
-        type(value).__name__, 
-        key, 
-        last_segment
-    )
-
-    # Determine icon, device class, unit, etc. based on key and value type
-    icon = "mdi:car-wrench"
-    device_class = None
-    state_class = None
-    entity_category = EntityCategory.DIAGNOSTIC
-    unit = None
-    
-    # Try to infer the appropriate properties based on the key names and value
-    path_str = "_".join(path_parts).lower()
-    
-    # Check for timestamp fields
-    if (("date" in path_str.lower() or "time" in path_str.lower() or 
-         "timestamp" in path_str.lower() or "occurrence" in path_str.lower()) and 
-        isinstance(value, str)):
-        
-        # Check for format: YYYYMMDDHHMMSS
-        if len(value) == 14 and value.isdigit():
-            device_class = SensorDeviceClass.TIMESTAMP
-            icon = "mdi:clock"
-        
-        # Check for ISO format with T and colons
-        elif "T" in value and ":" in value:
-            device_class = SensorDeviceClass.TIMESTAMP
-            icon = "mdi:clock"
-    
-    # Handle TPMS information (tire pressure)
-    if "tpmsinformation" in path_str:
-        icon = "mdi:tire"
-        if "tprs" in path_str and "psi" in path_str:
-            device_class = SensorDeviceClass.PRESSURE
-            unit = UnitOfPressure.PSI
-            name = name.replace("Tprs", "Tire Pressure").replace("Disp", "")
-        elif "tprs" in path_str and "bar" in path_str:
-            device_class = SensorDeviceClass.PRESSURE
-            unit = UnitOfPressure.BAR
-            name = name.replace("Tprs", "Tire Pressure").replace("Disp", "")
-        elif "tprs" in path_str and "kp" in path_str:
-            device_class = SensorDeviceClass.PRESSURE
-            unit = UnitOfPressure.KPA
-            name = name.replace("Tprs", "Tire Pressure").replace("Disp", "")
-        elif "tyrepresswarn" in path_str:
-            name = name.replace("Tyre Press Warn", "Tire Pressure Warning")
-    
-    # Handle oil maintenance information
-    elif "oilmntinformation" in path_str:
-        icon = "mdi:oil"
-        if "remoildist" in path_str:
-            device_class = SensorDeviceClass.DISTANCE
-            if "mile" in path_str.lower():
-                unit = UnitOfLength.MILES
-                name = "Oil Change Distance Remaining (Miles)"
-            else:
-                unit = UnitOfLength.KILOMETERS
-                name = "Oil Change Distance Remaining (km)"
-    
-    # Handle regular maintenance information
-    elif "regularmntinformation" in path_str:
-        icon = "mdi:wrench"
-        if "remregdist" in path_str:
-            device_class = SensorDeviceClass.DISTANCE
-            if "mile" in path_str.lower():
-                unit = UnitOfLength.MILES
-                name = "Maintenance Distance Remaining (Miles)"
-            else:
-                unit = UnitOfLength.KILOMETERS
-                name = "Maintenance Distance Remaining (km)"
-    
-    # Handle odometer
-    elif "ododispvalue" in path_str:
-        device_class = SensorDeviceClass.DISTANCE
-        state_class = SensorStateClass.TOTAL_INCREASING
-        if "mile" in path_str.lower():
-            unit = UnitOfLength.MILES
-            name = "Odometer (Miles)"
-        else:
-            unit = UnitOfLength.KILOMETERS
-            name = "Odometer (km)"
-        icon = "mdi:counter"
-    
-    # Handle warning indicators
-    elif path_str.startswith("wng"):
-        icon = "mdi:alert-circle-outline"
-        name = name.replace("Wng", "Warning ")
-    
-    # Handle occurrence date (timestamp of report)
-    elif "occurrencedate" in path_str:
-        device_class = SensorDeviceClass.TIMESTAMP
-        icon = "mdi:calendar-clock"
-        name = "Last Report Time"
-    
-    # Generic handling for other types
-    elif "battery" in path_str:
-        if any(term in path_str for term in ["level", "charge", "percent"]):
-            device_class = SensorDeviceClass.BATTERY
-            unit = PERCENTAGE
-            icon = "mdi:battery"
-        elif any(term in path_str for term in ["health", "status"]):
-            icon = "mdi:battery-heart-variant"
-    
-    elif "oil" in path_str:
-        icon = "mdi:oil"
-        if any(term in path_str for term in ["life", "level", "percent"]):
-            unit = PERCENTAGE
-    
-    elif "tire" in path_str or "tyre" in path_str:
-        icon = "mdi:tire"
-        if "pressure" in path_str:
-            device_class = SensorDeviceClass.PRESSURE
-            # Try to determine if it's PSI or kPa based on the value
-            if isinstance(value, (int, float)) and value < 100:
-                unit = UnitOfPressure.PSI
-            else:
-                unit = UnitOfPressure.KPA
-    
-    elif "temperature" in path_str:
-        device_class = SensorDeviceClass.TEMPERATURE
-        unit = UnitOfTemperature.CELSIUS
-        icon = "mdi:thermometer"
-    
-    elif any(distance_term in path_str for distance_term in ["distance", "mileage", "odometer"]):
-        device_class = SensorDeviceClass.DISTANCE
-        unit = UnitOfLength.KILOMETERS
-        icon = "mdi:counter"
-    
-    elif any(date_term in path_str for date_term in ["date", "time", "last_update"]):
-        device_class = SensorDeviceClass.TIMESTAMP
-        icon = "mdi:calendar-clock"
-    
-    # Handle different value types
-    if isinstance(value, bool):
-        # For boolean values, don't use a unit
-        icon = "mdi:check-circle" if value else "mdi:alert-circle"
-    elif isinstance(value, (int, float)):
-        # Numeric values might represent measurements
-        state_class = SensorStateClass.MEASUREMENT
-    
-    description.icon = icon
-    description.device_class = device_class
-    description.state_class = state_class
-    description.native_unit_of_measurement = unit
-    description.entity_category = entity_category
-    description.name = name
-    
-    return description
-
-
-def search_health_report(data, search_path):
-    """Search for a specific path in a health report dictionary."""
-    if not data or not search_path:
-        return None
-        
-    # Clone the search path to avoid modifying the original
-    path = search_path.copy()
-    
-    # Start with the entire data structure
+    parts = path.split(".")
     current = data
     
     try:
-        # Convert path for logging
-        path_str = ".".join(str(p) for p in search_path)
-        _LOGGER.debug("Searching for path: %s in data", path_str)
-        
-        # Walk through the path segments
-        while path and current is not None:
-            segment = path.pop(0)
-            
-            # Handle segment as string
-            segment_str = str(segment)
-            
-            # If current is a dictionary
-            if isinstance(current, dict):
-                if segment_str in current:
-                    current = current[segment_str]
-                else:
-                    # Key not found
-                    _LOGGER.debug("Key %s not found in data at path %s", 
-                                segment_str, [str(p) for p in search_path[:-len(path) - 1]])
-                    return None
-            
-            # If current is a list
-            elif isinstance(current, list):
-                # Try to use segment as an index if possible
-                if segment_str.startswith("item") and segment_str[4:].isdigit():
-                    idx = int(segment_str[4:])
-                    if 0 <= idx < len(current):
-                        current = current[idx]
-                    else:
-                        # Index out of range
-                        _LOGGER.debug("Index %d out of range in list of length %d", idx, len(current))
-                        return None
-                elif segment_str.isdigit():
-                    # Direct numeric index
-                    idx = int(segment_str)
-                    if 0 <= idx < len(current):
-                        current = current[idx]
-                    else:
-                        # Index out of range
-                        _LOGGER.debug("Index %d out of range in list of length %d", idx, len(current))
-                        return None
-                else:
-                    # Try to find an item in the list that matches
-                    found = False
-                    for item in current:
-                        if isinstance(item, dict) and segment_str in item:
-                            current = item[segment_str]
-                            found = True
-                            break
-                    
-                    if not found:
-                        _LOGGER.debug("Could not find item %s in list", segment_str)
-                        return None
+        for part in parts:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
             else:
-                # Current is a primitive value but we have more path segments
-                _LOGGER.debug("Cannot traverse further - reached primitive value %s at path %s", 
-                            current, [str(p) for p in search_path[:-len(path) - 1]])
                 return None
-                
-        # Return the final value
         return current
-        
-    except Exception as ex:
-        _LOGGER.debug("Error searching for path %s in health report: %s", path_str, ex)
+    except (KeyError, TypeError):
         return None
-
 
 class MazdaHealthSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Mazda health sensor."""
 
-    entity_description: MazdaHealthSensorEntityDescription
-
     def __init__(
         self,
         coordinator,
-        description: MazdaHealthSensorEntityDescription,
-        vin: str,
-    ) -> None:
-        """Initialize the sensor with a coordinator and sensor description."""
+        vin,
+        data_path,
+        name,
+        icon,
+        device_class,
+        state_class,
+        unit_of_measurement,
+        entity_category,
+        options=None,
+        force_timestamp_conversion=False
+    ):
+        """Initialize the sensor."""
         super().__init__(coordinator)
-        self.entity_description = description
-        self.vin = vin
         
-        # Generate unique sensor ID with proper domain prefix
-        self._attr_unique_id = f"{DOMAIN}_{vin}_health_{description.key}"
+        self._vin = vin
+        self._data_path = data_path
+        self._name = name
+        self._icon = icon
+        self._device_class = device_class
+        self._state_class = state_class
+        self._unit_of_measurement = unit_of_measurement
+        self._entity_category = entity_category
+        self._options = options
+        self._force_timestamp_conversion = force_timestamp_conversion
         
-        # Set the name based on the description
-        self._attr_name = f"{description.name}"
+        # Create a unique_id based on VIN and data path
+        self._unique_id = f"{DOMAIN}_{vin}_health_{data_path}"
+        self._attr_has_entity_name = True
         
-        # Create basic device info first
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, vin)},
-            "manufacturer": "Mazda",
-            "model": "Unknown",
-            "name": f"Mazda Vehicle ({vin[-6:]})",  # Use last 6 digits of VIN as identifier
-            "sw_version": "",
-        }
-        
-        # Find vehicle info from the coordinator if available
-        vehicle_info = None
-        
-        # Try to get vehicle info from coordinator data
-        if coordinator.hass:
-            try:
-                # Get main coordinator if available for vehicle info
-                main_coordinator = None
-                for entry_id, data in coordinator.hass.data[DOMAIN].items():
-                    if DATA_COORDINATOR in data:
-                        main_coordinator = data[DATA_COORDINATOR]
-                        break
-                
-                # Try to get vehicle info from main coordinator
-                if main_coordinator and main_coordinator.data:
-                    for vehicle in main_coordinator.data:
-                        if vehicle.get("vin") == vin:
-                            vehicle_info = vehicle
-                            break
-            except (KeyError, AttributeError, TypeError) as err:
-                _LOGGER.debug("Could not get vehicle info: %s", err)
-        
-        # If we found vehicle info, enhance the device info
-        if vehicle_info:
-            model_name = vehicle_info.get("carlineName", "Unknown")
-            year = vehicle_info.get("modelYear", "")
-            nickname = vehicle_info.get("nickname", "")
-            
-            # Use nickname if available, otherwise use year + model
-            if nickname:
-                vehicle_name = nickname
-            else:
-                vehicle_name = f"{year} {model_name}".strip()
-                if not vehicle_name:
-                    vehicle_name = f"Mazda Vehicle ({vin[-6:]})"
-            
-            self._attr_device_info.update({
-                "manufacturer": vehicle_info.get("brand", "Mazda"),
-                "model": model_name,
-                "name": vehicle_name,
-                "sw_version": vehicle_info.get("version", ""),
-            })
-            
-        # Set entity category
-        if hasattr(description, "entity_category"):
-            self._attr_entity_category = description.entity_category
-        else:
-            self._attr_entity_category = EntityCategory.DIAGNOSTIC
-                
-        # Set icon if provided
-        if hasattr(description, "icon") and description.icon:
-            self._attr_icon = description.icon
-        else:
-            self._attr_icon = "mdi:car-wrench"
-            
-        # Set device class
-        if hasattr(description, "device_class") and description.device_class:
-            self._attr_device_class = description.device_class
-            
-        # Set options if provided
-        if hasattr(description, "options") and description.options:
-            self._attr_options = description.options
-        
-        # Set unit of measurement if provided
-        if hasattr(description, "native_unit_of_measurement") and description.native_unit_of_measurement:
-            self._attr_native_unit_of_measurement = description.native_unit_of_measurement
-            
-        # Set state class if provided
-        if hasattr(description, "state_class") and description.state_class:
-            self._attr_state_class = description.state_class
-            
-        # Force timestamp conversion for specific fields to support Home Assistant expectations
-        self._force_timestamp_conversion = (
-            self.device_class == SensorDeviceClass.TIMESTAMP or
-            "date" in description.key.lower() or
-            "time" in description.key.lower() or
-            "occurrence" in description.key.lower()
+        # Debug log for init
+        _LOGGER.debug(
+            "Initialized health sensor %s for VIN %s with path %s",
+            name, vin, data_path
         )
+
+    @property
+    def unique_id(self):
+        """Return a unique ID."""
+        return self._unique_id
+
+    @property
+    def name(self):
+        """Return the name of the sensor."""
+        return self._name
+
+    @property
+    def icon(self):
+        """Return the icon of the sensor."""
+        return self._icon
+
+    @property
+    def device_class(self):
+        """Return the device class of the sensor."""
+        return self._device_class
+
+    @property
+    def state_class(self):
+        """Return the state class of the sensor."""
+        return self._state_class
+
+    @property
+    def native_unit_of_measurement(self):
+        """Return the unit of measurement of the sensor."""
+        return self._unit_of_measurement
+
+    @property
+    def entity_category(self):
+        """Return the entity category."""
+        return self._entity_category
 
     @property
     def native_value(self):
         """Return the state of the sensor."""
         try:
-            if not self.coordinator.last_update_success:
-                _LOGGER.debug("Coordinator has not successfully updated for %s", self.entity_id)
-                return None
-                
             if not self.coordinator.data:
-                _LOGGER.debug("No data available from coordinator for %s", self.entity_id)
                 return None
                 
-            if self.vin not in self.coordinator.data:
-                _LOGGER.debug("No data available for vin %s in coordinator data for %s", 
-                             self.vin, self.entity_id)
+            # Find data for this VIN
+            if self._vin not in self.coordinator.data:
                 return None
+                
+            report = self.coordinator.data.get(self._vin, {})
             
-            health_report = self.coordinator.data[self.vin]
-            value = search_health_report(health_report, self.entity_description.path)
+            # Process data within remoteInfos if present (new API format)
+            if "remoteInfos" in report and isinstance(report["remoteInfos"], list) and report["remoteInfos"]:
+                data = report["remoteInfos"][0]
+            else:
+                # Otherwise use the report directly (may be pre-processed)
+                data = report
             
-            _LOGGER.debug("Extracting value for %s from path %s: %s", 
-                         self.entity_description.name, 
-                         self.entity_description.path, 
-                         value)
-                         
-            # Handle datetime/timestamp conversion if needed
-            if value is not None and isinstance(value, str):
-                # Force conversion for timestamp device class or known timestamp fields 
-                if self._force_timestamp_conversion:
-                    # Format: YYYYMMDDhhmmss (common in Mazda API)
-                    if len(value) == 14 and value.isdigit():
-                        try:
-                            _LOGGER.debug("Converting Mazda timestamp format '%s' to datetime with timezone", value)
+            # Extract value using the path
+            value = get_value_from_path(data, self._data_path)
+            
+            # Process the value based on sensor type
+            if value is None:
+                return None
+                
+            # Handle options-based sensors (like enums or booleans)
+            if self._options and isinstance(value, (int, float)):
+                # Typically 0 is "Off" and anything else is "On" or other state
+                try:
+                    index = min(int(value), len(self._options) - 1)
+                    return self._options[index]
+                except (ValueError, TypeError, IndexError):
+                    return str(value)
+            
+            # Handle timestamp values
+            if self._force_timestamp_conversion or (
+                self._device_class == SensorDeviceClass.TIMESTAMP or
+                any(marker in self._data_path.lower() for marker in ["date", "time", "occurrence"])
+            ):
+                try:
+                    # Try different timestamp formats
+                    if isinstance(value, str):
+                        # Format: "YYYYMMDDhhmmss" (e.g. "20250228041016")
+                        if re.match(r'^\d{14}$', value):
                             dt = datetime.strptime(value, "%Y%m%d%H%M%S")
-                            # Add UTC timezone information
                             return dt.replace(tzinfo=timezone.utc)
-                        except ValueError as ex:
-                            _LOGGER.warning("Failed to parse timestamp '%s': %s", value, ex)
-                            # Return original value so sensor still shows something
                             
-                    # ISO format with T separator
-                    elif "T" in value and ":" in value:
-                        try:
-                            _LOGGER.debug("Converting ISO format timestamp '%s' to datetime with timezone", value)
-                            # Replace Z with +00:00 for UTC timezone
+                        # Format: "YYYY-MM-DD'T'hh:mm:ss'Z'" (ISO format)
+                        elif "T" in value and (value.endswith("Z") or "+" in value):
                             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                            # Ensure timezone info is present
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
                             return dt
-                        except ValueError as ex:
-                            _LOGGER.warning("Failed to parse ISO timestamp '%s': %s", value, ex)
-                            # Return original value so sensor still shows something
-                    
-                    # Standard date/time format (YYYY-MM-DD HH:MM:SS) as seen in error logs
-                    elif value.count("-") == 2 and value.count(":") == 2 and " " in value:
-                        try:
-                            _LOGGER.debug("Converting standard datetime format '%s' to timezone-aware datetime", value)
-                            dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-                            # Add UTC timezone information
-                            return dt.replace(tzinfo=timezone.utc)
-                        except ValueError as ex:
-                            _LOGGER.warning("Failed to parse standard datetime '%s': %s", value, ex)
-                    
-                    # If we're supposed to be a timestamp but couldn't convert it,
-                    # log a warning but don't fail the entity
-                    _LOGGER.warning(
-                        "Received value '%s' for timestamp sensor %s but couldn't convert to datetime", 
-                        value, self.entity_id
-                    )
-                
-            # Return the value as-is for non-timestamp types or if conversion failed
+                            
+                        # Other potential formats can be added here
+                        
+                except (ValueError, TypeError) as e:
+                    _LOGGER.warning(f"Failed to convert timestamp value '{value}': {e}")
+                    # Return original value if conversion fails
+                    return value
+            
             return value
             
-        except Exception as ex:
-            _LOGGER.error("Error getting native value for %s: %s", self.entity_id, ex)
+        except Exception as e:
+            _LOGGER.error("Error getting value for sensor %s: %s", self._name, str(e))
             return None
 
     @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        return {
+            "data_path": self._data_path,
+            "vin": self._vin
+        }
+
+    @property
     def available(self):
-        """Return if the sensor is available."""
-        try:
-            # Check if coordinator has data at all
-            if not self.coordinator.data:
-                _LOGGER.debug("No coordinator data available for sensor %s", self.entity_id)
-                return False
-                
-            # Check if we have data for this vehicle
-            if self.vin not in self.coordinator.data:
-                _LOGGER.debug("No data available for VIN %s in sensor %s", self.vin, self.entity_id)
-                return False
-                
-            # Get the health report for this VIN
-            health_report = self.coordinator.data[self.vin]
-            if not health_report:
-                _LOGGER.debug("Empty health report for VIN %s in sensor %s", self.vin, self.entity_id) 
-                return False
-                
-            # Check if this sensor's path exists in the data
-            value = search_health_report(health_report, self.entity_description.path)
-            
-            # We consider the sensor available if the value exists (None is a valid value)
-            # The key validation is that we can retrieve some data point, even if it's None
-            return value is not None or isinstance(value, (bool, int)) or value == 0
-                
-        except Exception as ex:
-            _LOGGER.debug("Error checking availability for %s: %s", self.entity_id, ex)
+        """Return True if entity is available."""
+        # Check if coordinator is available and has data for this VIN
+        if not self.coordinator.last_update_success:
             return False
+            
+        if not self.coordinator.data:
+            return False
+            
+        if self._vin not in self.coordinator.data:
+            return False
+            
+        return True

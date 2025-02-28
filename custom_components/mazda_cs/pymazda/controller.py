@@ -88,6 +88,8 @@ class Controller:  # noqa: D101
             "offset": 0,
         }
 
+        _LOGGER.debug(f"Sending health report request for vehicle ID: {internal_vin}")
+        
         response = await self.connection.api_request(
             "POST",
             "remoteServices/getHealthReport/v4",
@@ -97,7 +99,19 @@ class Controller:  # noqa: D101
         )
 
         if response["resultCode"] != "200S00":
-            raise MazdaException("Failed to get health report")
+            _LOGGER.error(f"Failed to get health report for vehicle ID {internal_vin}: {response.get('resultCode', 'Unknown error')}")
+            raise MazdaException(f"Failed to get health report: {response.get('resultCode', 'Unknown error')}")
+
+        _LOGGER.debug(f"Health report API call succeeded for vehicle ID {internal_vin} with result code: {response['resultCode']}")
+        
+        # Check for health report data structure
+        if "healthReportData" in response:
+            vhcle_data = response.get("healthReportData", {}).get("vhcle", {})
+            report_date = vhcle_data.get("reportDate", "Unknown")
+            report_items_count = len(vhcle_data.get("reportItems", []))
+            _LOGGER.info(f"Health report retrieved for vehicle {internal_vin}: date={report_date}, items={report_items_count}")
+        else:
+            _LOGGER.warning(f"Health report for vehicle {internal_vin} has unexpected structure (missing healthReportData)")
 
         return response
 

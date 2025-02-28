@@ -132,6 +132,9 @@
       },
       "refresh_health_data": {
         "name": "Refresh Health Data"
+      },
+      "refresh_health_report": {
+        "name": "Refresh Health Report"
       }
     },
     "climate": {

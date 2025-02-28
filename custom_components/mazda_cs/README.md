@@ -78,38 +78,92 @@ This custom integration allows you to connect your Mazda vehicles to Home Assist
 
 ### Configuration Options
 
-All settings can be adjusted at any time by selecting "Configure" on the integration in the Home Assistant Integrations page.
+The Mazda Connected Services integration offers several configuration options to optimize its performance and tailor it to your specific needs. This section provides a detailed explanation of each option, its purpose, and recommended settings.
 
-#### Main Settings
+#### Time Intervals
 
-| Setting | Description | Default |
-|---------|-------------|---------|
-| Email | Your Mazda Connected Services account email | Required |
-| Password | Your Mazda Connected Services account password | Required |
-| Region | Your region (North America, Europe, Japan) | Required |
+| Option | Description | Range | Recommended | Purpose |
+|--------|-------------|-------|-------------|---------|
+| **Status Update Frequency** (minutes) | How often to update vehicle status data | 5-1440 min | 15-30 min | Controls how frequently the integration polls for vehicle status updates (location, fuel level, etc.) |
+| **Health Report Frequency** (minutes) | How often to retrieve vehicle health reports | 5-1440 min | 60-120 min | Controls how frequently the integration polls for vehicle health data (oil life, tire pressure, etc.) |
+| **Vehicle Processing Delay** (seconds) | Delay between processing multiple vehicles | 0-60 sec | 2-5 sec | Prevents API rate limiting when you have multiple vehicles |
+| **API Throttling Delay** (seconds) | Delay between API calls for the same vehicle | 0-30 sec | 1-2 sec | Prevents API rate limiting on consecutive calls to the same vehicle |
+| **Health Report Vehicle Delay** (seconds) | Delay between health report API calls | 5-300 sec | 30-60 sec | Separate delay specifically for health report requests, which are more resource-intensive |
 
-#### Update Intervals
+#### Advanced Options
 
-| Setting | Description | Range | Default |
-|---------|-------------|-------|---------|
-| Status Refresh Interval | How often to update vehicle status | 5-1440 minutes | 30 minutes |
-| Health Report Interval | How often to request vehicle health reports | 0.1-24 hours | 12 hours |
+| Option | Description | Default | Purpose |
+|--------|-------------|---------|---------|
+| **Debug Mode** | Enable detailed debug logging | Disabled | Provides comprehensive logging for troubleshooting integration issues |
+| **Log API Responses** | Log all API responses | Disabled | Records complete API responses in logs (WARNING: may include sensitive information) |
+| **Testing Mode** | Override settings for testing | Disabled | Automatically adjusts intervals to shorter values for quicker testing |
+| **Performance Metrics** | Track API call performance | Disabled | Records timing metrics for API calls to help identify performance issues |
+| **Discovery Mode** | Enable sensor discovery | Disabled | Shows all available sensors and data paths for advanced configuration |
 
-#### Advanced Settings
+#### Recommended Settings
 
-| Setting | Description | Range | Default |
-|---------|-------------|-------|---------|
-| Vehicle Processing Delay | Delay between processing multiple vehicles | 0-10 seconds | 1 second |
-| Endpoint Processing Delay | Delay between API calls | 0-10 seconds | 1 second |
+For optimal performance and reliability with the Mazda Connected Services API, we recommend:
 
-#### Debugging Options
+1. **Basic Usage (Single Vehicle)**
+   - Status Update: 15 minutes
+   - Health Report: 60 minutes
+   - Vehicle Delay: 2 seconds
+   - API Throttling: 1 second
+   - Health Report Delay: 30 seconds
 
-| Setting | Description | Default |
-|---------|-------------|---------|
-| Debug Mode | Enable detailed logging for troubleshooting | Disabled |
-| Log API Responses | Log all API responses (warning: may include sensitive information) | Disabled |
-| Testing Mode | Simulate API responses for testing | Disabled |
-| Performance Metrics | Track API call performance metrics | Disabled |
+2. **Multiple Vehicles (3+)**
+   - Status Update: 30 minutes
+   - Health Report: 120 minutes
+   - Vehicle Delay: 5-10 seconds
+   - API Throttling: 2 seconds
+   - Health Report Delay: 60 seconds
+
+3. **Troubleshooting Mode**
+   - Debug Mode: Enabled
+   - Log API Responses: Enabled (temporarily)
+   - Vehicle Delay: 10-15 seconds
+   - API Throttling: 2-3 seconds
+   - Health Report Delay: 60-90 seconds
+
+#### Option Details
+
+#### Status Update Frequency
+Controls how often the integration polls for current vehicle status, including location, fuel level, and door/window states. Lower values provide more frequent updates but increase API calls.
+
+#### Health Report Frequency
+Controls how often the integration requests detailed vehicle health information. Health reports are more resource-intensive for the Mazda API and should be requested less frequently than status updates.
+
+#### Vehicle Processing Delay
+If you have multiple vehicles, this setting adds a delay between processing each vehicle to avoid overwhelming the Mazda API. Higher values are recommended for accounts with many vehicles.
+
+#### API Throttling Delay
+Adds a delay between consecutive API calls to the same vehicle. This helps prevent rate limiting and temporary blocks from the Mazda API.
+
+#### Health Report Vehicle Delay
+Similar to the Vehicle Processing Delay but specifically for health report requests. Since health reports are more intensive, a longer delay is recommended.
+
+#### Debug Mode
+Enables detailed logging of the integration's operations. Useful when troubleshooting issues but generates more log data.
+
+#### Log API Responses
+Records complete API responses in the Home Assistant logs. Helpful for advanced troubleshooting but may include sensitive information.
+
+#### Testing Mode
+When enabled, automatically adjusts time intervals to shorter values for faster testing. Not recommended for regular use as it increases API calls significantly.
+
+#### Performance Metrics
+Tracks and reports timing statistics for API calls, helping identify performance bottlenecks or connection issues.
+
+#### Discovery Mode
+Enables special logging that shows all available sensor paths in the Mazda API responses. Useful for advanced users who want to explore available data or create custom templates.
+
+### Implementation Notes
+
+- All time intervals are converted appropriately in the backend (minutes to seconds for internal processing)
+- Testing Mode overrides user-set values with faster refresh rates for development
+- Debug Mode increases log verbosity for the entire integration
+- Performance Metrics are displayed when the integration is restarted or removed
+- Discovery Mode outputs detailed sensor paths in the logs during startup
 
 ## Available Entities
 

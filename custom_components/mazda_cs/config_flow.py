@@ -20,10 +20,12 @@ from .const import (
     CONF_ENDPOINT_INTERVAL,
     CONF_HEALTH_REPORT_INTERVAL,
     CONF_HEALTH_VEHICLE_INTERVAL,
+    CONF_HEALTH_TIMEOUT,
     CONF_DEBUG_MODE,
     CONF_LOG_RESPONSES,
     CONF_ENABLE_METRICS,
     CONF_TESTING_MODE,
+    CONF_DISCOVERY_MODE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,7 +41,7 @@ DATA_SCHEMA = vol.Schema(
             description={
                 "suggested_value": 15,
                 "name": "Status Update Frequency (minutes)",
-                "description": "How often to update vehicle status (5-1440 min)"
+                "description": "How often to update vehicle status (5-1440 minutes)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
         vol.Optional(
@@ -47,8 +49,8 @@ DATA_SCHEMA = vol.Schema(
             default=2,
             description={
                 "suggested_value": 2,
-                "name": "Delay Between Vehicles (seconds)",
-                "description": "Delay between processing each vehicle (0-60 sec)"
+                "name": "Vehicle Processing Delay (seconds)",
+                "description": "Delay between processing each vehicle (0-60 seconds)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
         vol.Optional(
@@ -57,7 +59,7 @@ DATA_SCHEMA = vol.Schema(
             description={
                 "suggested_value": 1,
                 "name": "API Throttling Delay (seconds)",
-                "description": "Delay between API calls for same vehicle (0-30 sec)"
+                "description": "Delay between API calls for same vehicle (0-30 seconds)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=0, max=30)),
         vol.Optional(
@@ -75,9 +77,18 @@ DATA_SCHEMA = vol.Schema(
             description={
                 "suggested_value": 30,
                 "name": "Health Report Vehicle Delay (seconds)",
-                "description": "Delay between health report calls (5-300 sec)"
+                "description": "Delay between health report calls for different vehicles (5-300 seconds)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
+        vol.Optional(
+            CONF_HEALTH_TIMEOUT,
+            default=45,
+            description={
+                "suggested_value": 45,
+                "name": "Health Report API Timeout (seconds)",
+                "description": "Maximum wait time for health report API calls (30-180 seconds)"
+            },
+        ): vol.All(vol.Coerce(int), vol.Range(min=30, max=180)),
     }
 )
 
@@ -88,7 +99,7 @@ OPTIONS_SCHEMA = vol.Schema(
             default=15,
             description={
                 "suggested_value": 15,
-                "name": "Status Update Frequency",
+                "name": "Status Update Frequency (minutes)",
                 "description": "How often to update vehicle status (5-1440 minutes)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
@@ -97,7 +108,7 @@ OPTIONS_SCHEMA = vol.Schema(
             default=60,
             description={
                 "suggested_value": 60,
-                "name": "Health Report Frequency",
+                "name": "Health Report Frequency (minutes)",
                 "description": "How often to retrieve health reports (5-1440 minutes)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
@@ -106,8 +117,8 @@ OPTIONS_SCHEMA = vol.Schema(
             default=2,
             description={
                 "suggested_value": 2,
-                "name": "Vehicle Processing Delay",
-                "description": "Time between processing each vehicle (0-60 seconds)"
+                "name": "Vehicle Processing Delay (seconds)",
+                "description": "Delay between processing each vehicle (0-60 seconds)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
         vol.Optional(
@@ -115,8 +126,8 @@ OPTIONS_SCHEMA = vol.Schema(
             default=1,
             description={
                 "suggested_value": 1,
-                "name": "API Call Delay",
-                "description": "Time between API calls for same vehicle (0-30 seconds)"
+                "name": "API Throttling Delay (seconds)",
+                "description": "Delay between API calls for same vehicle (0-30 seconds)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=0, max=30)),
         vol.Optional(
@@ -124,17 +135,26 @@ OPTIONS_SCHEMA = vol.Schema(
             default=30,
             description={
                 "suggested_value": 30,
-                "name": "Health Report API Delay",
-                "description": "Time between health report API calls (5-300 seconds)"
+                "name": "Health Report Vehicle Delay (seconds)",
+                "description": "Delay between health report calls for different vehicles (5-300 seconds)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
+        vol.Optional(
+            CONF_HEALTH_TIMEOUT,
+            default=45,
+            description={
+                "suggested_value": 45,
+                "name": "Health Report API Timeout (seconds)",
+                "description": "Maximum wait time for health report API calls (30-180 seconds)"
+            },
+        ): vol.All(vol.Coerce(int), vol.Range(min=30, max=180)),
         vol.Optional(
             CONF_DEBUG_MODE,
             default=False,
             description={
                 "suggested_value": False,
                 "name": "Debug Mode",
-                "description": "Enable detailed debug logging"
+                "description": "Enable detailed debug logging in Home Assistant logs"
             },
         ): bool,
         vol.Optional(
@@ -143,7 +163,7 @@ OPTIONS_SCHEMA = vol.Schema(
             description={
                 "suggested_value": False,
                 "name": "Log API Responses",
-                "description": "Log full API responses (WARNING: may include sensitive data)"
+                "description": "Log complete API responses (WARNING: may include sensitive data)"
             },
         ): bool,
         vol.Optional(
@@ -152,7 +172,7 @@ OPTIONS_SCHEMA = vol.Schema(
             description={
                 "suggested_value": False,
                 "name": "Testing Mode",
-                "description": "Enables more frequent updates for testing"
+                "description": "Use accelerated update intervals for testing purposes"
             },
         ): bool,
         vol.Optional(
@@ -161,7 +181,16 @@ OPTIONS_SCHEMA = vol.Schema(
             description={
                 "suggested_value": False,
                 "name": "Performance Metrics",
-                "description": "Track API performance metrics"
+                "description": "Track and log API call performance statistics"
+            },
+        ): bool,
+        vol.Optional(
+            CONF_DISCOVERY_MODE,
+            default=False,
+            description={
+                "suggested_value": False,
+                "name": "Discovery Mode",
+                "description": "Log all available sensor data paths to help with troubleshooting"
             },
         ): bool,
     }
@@ -240,7 +269,7 @@ class MazdaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         description={
                             "suggested_value": 15,
                             "name": "Status Update Frequency (minutes)",
-                            "description": "How often to update vehicle status (5-1440 min)"
+                            "description": "How often to update vehicle status (5-1440 minutes)"
                         },
                     ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
                     vol.Optional(
@@ -248,8 +277,8 @@ class MazdaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         default=2,
                         description={
                             "suggested_value": 2,
-                            "name": "Delay Between Vehicles (seconds)",
-                            "description": "Delay between processing each vehicle (0-60 sec)"
+                            "name": "Vehicle Processing Delay (seconds)",
+                            "description": "Delay between processing each vehicle (0-60 seconds)"
                         },
                     ): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
                     vol.Optional(
@@ -258,7 +287,7 @@ class MazdaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         description={
                             "suggested_value": 1,
                             "name": "API Throttling Delay (seconds)",
-                            "description": "Delay between API calls for same vehicle (0-30 sec)"
+                            "description": "Delay between API calls for same vehicle (0-30 seconds)"
                         },
                     ): vol.All(vol.Coerce(int), vol.Range(min=0, max=30)),
                     vol.Optional(
@@ -276,9 +305,18 @@ class MazdaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         description={
                             "suggested_value": 30,
                             "name": "Health Report Vehicle Delay (seconds)",
-                            "description": "Delay between health report calls (5-300 sec)"
+                            "description": "Delay between health report calls for different vehicles (5-300 seconds)"
                         },
                     ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
+                    vol.Optional(
+                        CONF_HEALTH_TIMEOUT,
+                        default=45,
+                        description={
+                            "suggested_value": 45,
+                            "name": "Health Report API Timeout (seconds)",
+                            "description": "Maximum wait time for health report API calls (30-180 seconds)"
+                        },
+                    ): vol.All(vol.Coerce(int), vol.Range(min=30, max=180)),
                 }
             ),
             errors=errors,
@@ -356,10 +394,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             CONF_ENDPOINT_INTERVAL: current_config.get(CONF_ENDPOINT_INTERVAL, 1),
             CONF_HEALTH_REPORT_INTERVAL: current_config.get(CONF_HEALTH_REPORT_INTERVAL, 60),
             CONF_HEALTH_VEHICLE_INTERVAL: current_config.get(CONF_HEALTH_VEHICLE_INTERVAL, 30),
+            CONF_HEALTH_TIMEOUT: current_config.get(CONF_HEALTH_TIMEOUT, 45),
             CONF_DEBUG_MODE: current_config.get(CONF_DEBUG_MODE, False),
             CONF_LOG_RESPONSES: current_config.get(CONF_LOG_RESPONSES, False),
             CONF_TESTING_MODE: current_config.get(CONF_TESTING_MODE, False),
             CONF_ENABLE_METRICS: current_config.get(CONF_ENABLE_METRICS, False),
+            CONF_DISCOVERY_MODE: current_config.get(CONF_DISCOVERY_MODE, False),
         }
 
         return self.async_show_form(

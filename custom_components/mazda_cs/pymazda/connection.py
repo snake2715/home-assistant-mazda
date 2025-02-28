@@ -244,9 +244,14 @@ class Connection:
         retry_message = (
             (" - attempt #" + str(num_retries + 1)) if (num_retries > 0) else ""
         )
-        self.logger.debug(
-            f"Sending {method} request to {uri}{retry_message}"  # noqa: G004
-        )  # noqa: G004
+        if "getHealthReport" in uri:
+            self.logger.debug(
+                f"Sending {method} request to {uri}{retry_message} for health report discovery"  # noqa: G004
+            )
+        else:
+            self.logger.debug(
+                f"Sending {method} request to {uri}{retry_message}"  # noqa: G004
+            )  # noqa: G004
 
         try:
             return await self.__send_api_request(
@@ -374,6 +379,25 @@ class Connection:
                 decrypted_payload = self.__decrypt_payload_using_key(
                     response_json["payload"]
                 )
+                if "getHealthReport" in uri:
+                    try:
+                        if isinstance(decrypted_payload, dict):
+                            healthReportData = decrypted_payload.get("healthReportData", {})
+                            vhcle = healthReportData.get("vhcle", {})
+                            reportDate = vhcle.get("reportDate", "Unknown")
+                            reportItems = vhcle.get("reportItems", [])
+                            self.logger.debug(
+                                f"Health report response for date {reportDate}: contains {len(reportItems)} report items"
+                            )
+                            # Log the keys of the first few report items for debugging
+                            if reportItems and len(reportItems) > 0:
+                                item_keys = []
+                                for i, item in enumerate(reportItems[:3]):  # Log first 3 items
+                                    item_keys.append(f"Item {i+1}: {list(item.keys())}")
+                                self.logger.debug(f"Sample report items: {', '.join(item_keys)}")
+                    except Exception as e:
+                        self.logger.debug(f"Error parsing health report for detailed logging: {e}")
+                
                 self.logger.debug("Response payload: %s", decrypted_payload)
                 return decrypted_payload
         elif response_json.get("errorCode") == 600001:

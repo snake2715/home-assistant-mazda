@@ -19,14 +19,14 @@
                     "refresh_interval": "Status Update Frequency (minutes)",
                     "vehicle_interval": "Delay Between Vehicles (seconds)",
                     "endpoint_interval": "API Throttling Delay (seconds)",
-                    "health_report_interval": "Health Report Frequency (hours)",
+                    "health_report_interval": "Health Report Frequency (minutes)",
                     "health_vehicle_interval": "Health Report Vehicle Delay (seconds)"
                 },
                 "data_description": {
                     "refresh_interval": "How often to update vehicle status (5-1440 min)",
                     "vehicle_interval": "Delay between processing each vehicle (0-60 sec)",
                     "endpoint_interval": "Delay between API calls for same vehicle (0-30 sec)",
-                    "health_report_interval": "How often to retrieve health reports (0.1-24 hours)",
+                    "health_report_interval": "How often to retrieve health reports (5-1440 min)",
                     "health_vehicle_interval": "Delay between health report calls (5-300 sec)"
                 },
                 "description": "Please enter the email address and password you use to log into the MyMazda mobile app."
@@ -40,14 +40,14 @@
                     "refresh_interval": "Status Update Frequency (minutes)",
                     "vehicle_interval": "Delay Between Vehicles (seconds)",
                     "endpoint_interval": "API Throttling Delay (seconds)",
-                    "health_report_interval": "Health Report Frequency (hours)",
+                    "health_report_interval": "Health Report Frequency (minutes)",
                     "health_vehicle_interval": "Health Report Vehicle Delay (seconds)"
                 },
                 "data_description": {
                     "refresh_interval": "How often to update vehicle status (5-1440 min)",
                     "vehicle_interval": "Delay between processing each vehicle (0-60 sec)",
                     "endpoint_interval": "Delay between API calls for same vehicle (0-30 sec)",
-                    "health_report_interval": "How often to retrieve health reports (0.1-24 hours)",
+                    "health_report_interval": "How often to retrieve health reports (5-1440 min)",
                     "health_vehicle_interval": "Delay between health report calls (5-300 sec)"
                 },
                 "description": "Adjust update frequencies and API throttling for your Mazda Connected Services."
