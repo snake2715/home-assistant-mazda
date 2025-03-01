@@ -1,5 +1,13 @@
 """Constants for the Mazda Connected Services integration."""
 
+# TPMS Warning Level Definitions
+# These are the meanings of the numeric values returned by the Mazda API
+# 0 = Normal - No issues detected with tire pressure
+# 1 = Warning - Minor pressure deviation from recommended value
+# 2 = Low Pressure - Tire pressure significantly below recommended value
+# 3 = Critical - Dangerous tire pressure condition or possible TPMS sensor issue
+# 4 = System Error - TPMS system malfunction or communication error
+
 DOMAIN = "mazda_cs"
 
 # Configuration and Options
@@ -356,28 +364,28 @@ CX30_HEALTH_TEMPLATE = {
         "name": "Front Left Tire Pressure Warning",
         "icon": "mdi:car-tire-alert",
         "device_class": None,
-        "options": ["Off", "On"],
+        "options": ["Normal", "Warning", "Low Pressure", "Critical", "System Error"],
         "entity_category": "diagnostic"
     },
     "TPMSInformation.FRTyrePressWarn": {
         "name": "Front Right Tire Pressure Warning",
         "icon": "mdi:car-tire-alert",
         "device_class": None,
-        "options": ["Off", "On"],
+        "options": ["Normal", "Warning", "Low Pressure", "Critical", "System Error"],
         "entity_category": "diagnostic"
     },
     "TPMSInformation.RLTyrePressWarn": {
         "name": "Rear Left Tire Pressure Warning",
         "icon": "mdi:car-tire-alert",
         "device_class": None,
-        "options": ["Off", "On"],
+        "options": ["Normal", "Warning", "Low Pressure", "Critical", "System Error"],
         "entity_category": "diagnostic"
     },
     "TPMSInformation.RRTyrePressWarn": {
         "name": "Rear Right Tire Pressure Warning",
         "icon": "mdi:car-tire-alert",
         "device_class": None,
-        "options": ["Off", "On"],
+        "options": ["Normal", "Warning", "Low Pressure", "Critical", "System Error"],
         "entity_category": "diagnostic"
     },
     
@@ -488,28 +496,28 @@ CX5_HEALTH_TEMPLATE = {
         "name": "Front Left Tire Pressure Warning",
         "icon": "mdi:car-tire-alert",
         "device_class": None,
-        "options": ["Off", "On", "Unknown"],
+        "options": ["Normal", "Warning", "Low Pressure", "Critical", "System Error"],
         "entity_category": "diagnostic"
     },
     "TPMSInformation.FRTyrePressWarn": {
         "name": "Front Right Tire Pressure Warning",
         "icon": "mdi:car-tire-alert",
         "device_class": None,
-        "options": ["Off", "On", "Unknown"],
+        "options": ["Normal", "Warning", "Low Pressure", "Critical", "System Error"],
         "entity_category": "diagnostic"
     },
     "TPMSInformation.RLTyrePressWarn": {
         "name": "Rear Left Tire Pressure Warning",
         "icon": "mdi:car-tire-alert",
         "device_class": None,
-        "options": ["Off", "On", "Unknown"],
+        "options": ["Normal", "Warning", "Low Pressure", "Critical", "System Error"],
         "entity_category": "diagnostic"
     },
     "TPMSInformation.RRTyrePressWarn": {
         "name": "Rear Right Tire Pressure Warning",
         "icon": "mdi:car-tire-alert",
         "device_class": None,
-        "options": ["Off", "On", "Unknown"],
+        "options": ["Normal", "Warning", "Low Pressure", "Critical", "System Error"],
         "entity_category": "diagnostic"
     },
     
