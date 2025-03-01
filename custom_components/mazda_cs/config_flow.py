@@ -64,13 +64,13 @@ DATA_SCHEMA = vol.Schema(
         ): vol.All(vol.Coerce(int), vol.Range(min=0, max=30)),
         vol.Optional(
             CONF_HEALTH_REPORT_INTERVAL,
-            default=60,
+            default=15,
             description={
-                "suggested_value": 60,
+                "suggested_value": 15,
                 "name": "Health Report Frequency (minutes)",
-                "description": "How often to retrieve health reports (5-1440 minutes)"
+                "description": "How often to retrieve health reports (1-1440 minutes)"
             },
-        ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
+        ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
         vol.Optional(
             CONF_HEALTH_VEHICLE_INTERVAL,
             default=30,
@@ -105,13 +105,13 @@ OPTIONS_SCHEMA = vol.Schema(
         ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
         vol.Optional(
             CONF_HEALTH_REPORT_INTERVAL,
-            default=60,
+            default=15,
             description={
-                "suggested_value": 60,
+                "suggested_value": 15,
                 "name": "Health Report Frequency (minutes)",
-                "description": "How often to retrieve health reports (5-1440 minutes)"
+                "description": "How often to retrieve health reports (1-1440 minutes)"
             },
-        ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
+        ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
         vol.Optional(
             CONF_VEHICLE_INTERVAL,
             default=2,
@@ -292,13 +292,13 @@ class MazdaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): vol.All(vol.Coerce(int), vol.Range(min=0, max=30)),
                     vol.Optional(
                         CONF_HEALTH_REPORT_INTERVAL,
-                        default=60,
+                        default=15,
                         description={
-                            "suggested_value": 60,
+                            "suggested_value": 15,
                             "name": "Health Report Frequency (minutes)",
-                            "description": "How often to retrieve health reports (5-1440 minutes)"
+                            "description": "How often to retrieve health reports (1-1440 minutes)"
                         },
-                    ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
                     vol.Optional(
                         CONF_HEALTH_VEHICLE_INTERVAL,
                         default=30,
@@ -392,7 +392,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             CONF_REFRESH_INTERVAL: current_config.get(CONF_REFRESH_INTERVAL, 15),
             CONF_VEHICLE_INTERVAL: current_config.get(CONF_VEHICLE_INTERVAL, 2),
             CONF_ENDPOINT_INTERVAL: current_config.get(CONF_ENDPOINT_INTERVAL, 1),
-            CONF_HEALTH_REPORT_INTERVAL: current_config.get(CONF_HEALTH_REPORT_INTERVAL, 60),
+            CONF_HEALTH_REPORT_INTERVAL: current_config.get(CONF_HEALTH_REPORT_INTERVAL, 15),
             CONF_HEALTH_VEHICLE_INTERVAL: current_config.get(CONF_HEALTH_VEHICLE_INTERVAL, 30),
             CONF_HEALTH_TIMEOUT: current_config.get(CONF_HEALTH_TIMEOUT, 45),
             CONF_DEBUG_MODE: current_config.get(CONF_DEBUG_MODE, False),

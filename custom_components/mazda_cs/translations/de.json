@@ -19,7 +19,7 @@
                     "refresh_interval": "Status-Update-Häufigkeit (Minuten)",
                     "vehicle_interval": "Verzögerung zwischen Fahrzeugen (Sekunden)",
                     "endpoint_interval": "API-Drosselungsverzögerung (Sekunden)",
-                    "health_report_interval": "Häufigkeit der Gesundheitsberichte (Stunden)",
+                    "health_report_interval": "Häufigkeit der Gesundheitsberichte (Minuten)",
                     "health_vehicle_interval": "Verzögerung für Gesundheitsberichte (Sekunden)"
                 },
                 "description": "Bitte geben Sie die E-Mail-Adresse und das Passwort ein, die Sie für die Anmeldung in der MyMazda-App verwenden.",
@@ -27,7 +27,7 @@
                     "refresh_interval": "Wie oft Fahrzeugstatusdaten aktualisiert werden (5-1440 Min)",
                     "vehicle_interval": "Verzögerung zwischen der Verarbeitung jedes Fahrzeugs (0-60 Sek)",
                     "endpoint_interval": "Verzögerung zwischen API-Aufrufen für dasselbe Fahrzeug (0-30 Sek)",
-                    "health_report_interval": "Wie oft Gesundheitsberichte abgerufen werden (0,1-24 Stunden)",
+                    "health_report_interval": "Wie oft Gesundheitsberichte abgerufen werden (1-1440 Min)",
                     "health_vehicle_interval": "Verzögerung zwischen Gesundheitsberichtsanfragen (5-300 Sek)"
                 }
             }
@@ -40,7 +40,7 @@
                     "refresh_interval": "Status-Update-Häufigkeit (Minuten)",
                     "vehicle_interval": "Verzögerung zwischen Fahrzeugen (Sekunden)",
                     "endpoint_interval": "API-Drosselungsverzögerung (Sekunden)",
-                    "health_report_interval": "Häufigkeit der Gesundheitsberichte (Stunden)",
+                    "health_report_interval": "Häufigkeit der Gesundheitsberichte (Minuten)",
                     "health_vehicle_interval": "Verzögerung für Gesundheitsberichte (Sekunden)"
                 },
                 "description": "Passen Sie die Update-Häufigkeit und API-Drosselung für Ihre Mazda Connected Services an.",
@@ -48,7 +48,7 @@
                     "refresh_interval": "Wie oft Fahrzeugstatusdaten aktualisiert werden (5-1440 Min)",
                     "vehicle_interval": "Verzögerung zwischen der Verarbeitung jedes Fahrzeugs (0-60 Sek)",
                     "endpoint_interval": "Verzögerung zwischen API-Aufrufen für dasselbe Fahrzeug (0-30 Sek)",
-                    "health_report_interval": "Wie oft Gesundheitsberichte abgerufen werden (0,1-24 Stunden)",
+                    "health_report_interval": "Wie oft Gesundheitsberichte abgerufen werden (1-1440 Min)",
                     "health_vehicle_interval": "Verzögerung zwischen Gesundheitsberichtsanfragen (5-300 Sek)"
                 }
             }

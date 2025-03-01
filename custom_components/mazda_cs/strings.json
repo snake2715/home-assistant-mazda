@@ -40,10 +40,12 @@
           "vehicle_interval": "Vehicle Processing Delay (seconds)",
           "endpoint_interval": "API Call Delay (seconds)",
           "health_vehicle_interval": "Health Report API Delay (seconds)",
+          "health_timeout": "Health Report API Timeout (seconds)",
           "debug_mode": "Debug Mode",
           "log_responses": "Log API Responses",
           "testing_mode": "Testing Mode",
-          "enable_metrics": "Performance Metrics"
+          "enable_metrics": "Performance Metrics",
+          "discovery_mode": "Sensor Discovery Mode"
         }
       }
     }

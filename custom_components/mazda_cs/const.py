@@ -25,7 +25,7 @@ CONF_HEALTH_TIMEOUT = "health_timeout"  # Timeout for health report API calls
 DEFAULT_REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
 DEFAULT_VEHICLE_INTERVAL = 2
 DEFAULT_ENDPOINT_INTERVAL = 1
-DEFAULT_HEALTH_REPORT_INTERVAL = 60 * 60  # 60 minutes in seconds
+DEFAULT_HEALTH_REPORT_INTERVAL = 60  # 60 minutes (stored as minutes)
 DEFAULT_HEALTH_VEHICLE_INTERVAL = 30
 DEFAULT_HEALTH_TIMEOUT = 45  # Default timeout for health report API calls in seconds
 

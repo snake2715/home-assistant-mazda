@@ -31,7 +31,7 @@ All notable changes to the Mazda Connected Services integration will be document
 - Improved user interface for configuration:
   - Converted time intervals to more user-friendly units:
     - Status refresh interval from seconds to minutes (5-1440 min)
-    - Health report interval from seconds to hours (0.1-24 hours)
+    - Health report interval from seconds to minutes (1-1440 min)
   - Added detailed descriptions for all configuration fields
   - Implemented proper conversion between user-friendly units and internal seconds
 - Enhanced `strings.json` with more descriptive configuration options

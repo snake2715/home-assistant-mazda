@@ -104,14 +104,20 @@ class Controller:  # noqa: D101
 
         _LOGGER.debug(f"Health report API call succeeded for vehicle ID {internal_vin} with result code: {response['resultCode']}")
         
-        # Check for health report data structure
+        # Check for different health report data structures
         if "healthReportData" in response:
+            # Original structure with healthReportData
             vhcle_data = response.get("healthReportData", {}).get("vhcle", {})
             report_date = vhcle_data.get("reportDate", "Unknown")
             report_items_count = len(vhcle_data.get("reportItems", []))
             _LOGGER.info(f"Health report retrieved for vehicle {internal_vin}: date={report_date}, items={report_items_count}")
+        elif "remoteInfos" in response and isinstance(response["remoteInfos"], list) and len(response["remoteInfos"]) > 0:
+            # New structure with remoteInfos array
+            remote_info = response["remoteInfos"][0]
+            occurrence_date = remote_info.get("OccurrenceDate", "Unknown")
+            _LOGGER.info(f"Health report retrieved for vehicle {internal_vin} with occurrence date: {occurrence_date}")
         else:
-            _LOGGER.warning(f"Health report for vehicle {internal_vin} has unexpected structure (missing healthReportData)")
+            _LOGGER.warning(f"Health report for vehicle {internal_vin} has unexpected structure (missing both healthReportData and remoteInfos)")
 
         return response
 

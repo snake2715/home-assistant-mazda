@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+import logging
+from datetime import datetime, timedelta, timezone
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 from typing import TYPE_CHECKING
 
 import voluptuous as vol
@@ -66,7 +68,19 @@ from .pymazda.exceptions import (
     MazdaTokenExpiredException,
 )
 
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+LOG_MAX_SIZE = 5 * 1024 * 1024  # 5MB
+LOG_BACKUP_COUNT = 3
+
 _LOGGER = logging.getLogger(__name__)
+mazda_logger = logging.getLogger('custom_components.mazda_cs')
+handler = RotatingFileHandler(
+    'mazda_integration.log',
+    maxBytes=LOG_MAX_SIZE,
+    backupCount=LOG_BACKUP_COUNT
+)
+handler.setFormatter(logging.Formatter(LOG_FORMAT))
+mazda_logger.addHandler(handler)
 
 PLATFORMS = [
     Platform.BINARY_SENSOR,
@@ -135,9 +149,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL // 60
     ) * 60  # Convert minutes to seconds
     
-    health_report_interval = entry.options.get(
-        CONF_HEALTH_REPORT_INTERVAL, DEFAULT_HEALTH_REPORT_INTERVAL // 60
-    ) * 60  # Convert minutes to seconds
+    # Get health report interval in minutes
+    health_report_minutes = entry.options.get(
+        CONF_HEALTH_REPORT_INTERVAL, DEFAULT_HEALTH_REPORT_INTERVAL
+    )
+    # Convert minutes to seconds for actual usage
+    health_report_interval = health_report_minutes * 60
+    
+    _LOGGER.debug(
+        "Health report interval set to %d minutes (%d seconds)",
+        health_report_minutes,
+        health_report_interval
+    )
     
     vehicle_interval = entry.options.get(CONF_VEHICLE_INTERVAL, DEFAULT_VEHICLE_INTERVAL)
     endpoint_interval = entry.options.get(CONF_ENDPOINT_INTERVAL, DEFAULT_ENDPOINT_INTERVAL)
@@ -155,6 +178,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         
         if health_report_interval > 900:  # 15 minutes in seconds
             health_report_interval = 900
+            health_report_minutes = 15  # Update minutes to match seconds
             _LOGGER.info("Testing mode: Using 15-minute health report interval")
     
     # Enable API response logging if selected
@@ -460,12 +484,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ) -> None:
             self.client = client
             self.config_entry = config_entry
+            self.hass = hass
             
-            # Convert minutes to seconds for health report interval
+            # Get health report interval in minutes, then convert to seconds for the coordinator
             health_minutes = config_entry.options.get(
                 CONF_HEALTH_REPORT_INTERVAL,
                 config_entry.data.get(CONF_HEALTH_REPORT_INTERVAL, DEFAULT_HEALTH_REPORT_INTERVAL)
             )
+            # Convert minutes to seconds for update interval
             update_interval_seconds = int(health_minutes * 60)
             
             # Get vehicle interval for health reports
@@ -505,247 +531,72 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             super().__init__(
                 hass,
                 _LOGGER,
-                name=f"{DOMAIN}_health_reports",
+                name="Mazda Health Report",
                 update_interval=timedelta(seconds=update_interval_seconds),
             )
             
-            self.data = {}  # Initialize with empty data structure
-            # Keep track of consecutive failures per vehicle
-            self.vehicle_failures = {}
-            # Keep record of last successful health report per vehicle
-            self.last_successful_reports = {}
-            # Track current refresh attempt state
-            self.is_refreshing = False
-            # Maximum attempts before fallback to cached data
-            self.max_attempts = 2
+            _LOGGER.debug(
+                "Health coordinator update interval set to %d minutes (%d seconds)",
+                health_minutes,
+                update_interval_seconds
+            )
 
         async def _async_update_data(self):
-            """Fetch health report data from the Mazda API."""
-            # Prevent simultaneous refresh attempts
-            if self.is_refreshing:
-                _LOGGER.debug("Health report refresh already in progress, skipping")
-                return self.data.copy() if self.data else {}
-            
-            self.is_refreshing = True
+            """Fetch and process health data for all vehicles."""
             try:
-                # Start with existing data - we'll update it as we process
-                # This ensures we keep old data when new requests fail
-                result = self.data.copy() if self.data else {}
+                # Use a dictionary keyed by VIN to store health reports
+                results = {}
                 
-                # Get list of vehicles
-                try:
-                    _LOGGER.debug("Requesting vehicles list for health report update")
-                    vehicles = await with_timeout(
-                        lambda: self.client.get_vehicles(),
-                        timeout_seconds=30,
-                        retry_on_cancel=True
-                    )
-                    
-                    if not vehicles:
-                        _LOGGER.error("No vehicles returned from API")
-                        # Return existing data rather than failing completely
-                        return result
-                except Exception as vehicle_ex:
-                    _LOGGER.error("Failed to get vehicles list: %s", vehicle_ex)
-                    # Return what we have rather than failing completely
-                    return result
+                # Get the list of vehicles from hass.data
+                vehicles = self.hass.data[DOMAIN][self.config_entry.entry_id][DATA_VEHICLES]
+                _LOGGER.debug("Processing health reports for %d vehicles", len(vehicles))
                 
-                # Process each vehicle
                 for index, vehicle in enumerate(vehicles):
-                    vin = vehicle.get("vin", "unknown")
-                    vehicle_id = vehicle.get("id")
+                    vehicle_id = vehicle["id"]
+                    vin = vehicle["vin"]
+                    nickname = vehicle.get("nickname", "")
+                    model = f"{vehicle.get('modelYear', '')} {vehicle.get('carlineName', '')}"
                     
-                    # Create vehicle info for logs
-                    vehicle_nickname = vehicle.get("nickname", "Unknown")
-                    vehicle_model = f"{vehicle.get('modelYear', '')} {vehicle.get('carlineName', '')}".strip()
-                    vehicle_info = f"{vehicle_nickname} ({vehicle_model})" if vehicle_nickname else vehicle_model or vin
-                    
-                    if not vehicle_id:
-                        _LOGGER.error("Vehicle ID missing for %s, skipping", vehicle_info)
-                        continue
-                    
-                    # Add inter-vehicle delay after first vehicle
+                    # Add delay between vehicles to prevent API rate limiting
                     if index > 0 and self.vehicle_interval > 0:
-                        _LOGGER.debug("Waiting %.1fs between health report requests", 
-                                     self.vehicle_interval)
+                        _LOGGER.debug("Waiting %d seconds before processing next vehicle", self.vehicle_interval)
                         await asyncio.sleep(self.vehicle_interval)
                     
-                    # Attempt health report with retries
-                    success = False
-                    attempts = 0
-                    report_result = None
-                    
-                    while not success and attempts < self.max_attempts:
-                        attempts += 1
-                        try:
-                            _LOGGER.debug("Requesting health report for %s (attempt %d of %d)", 
-                                         vehicle_info, attempts, self.max_attempts)
-                            
-                            health_report = await with_timeout(
-                                lambda: self.client.get_health_report(vehicle_id),
-                                timeout_seconds=self.health_timeout,  # Use configurable timeout
-                                retry_on_cancel=True
-                            )
-                            
-                            if health_report:
-                                # Check if we have a valid report with the expected structure
-                                if "resultCode" in health_report and health_report["resultCode"] == "200S00":
-                                    _LOGGER.debug("Got health report for %s", vehicle_info)
-                                    
-                                    # Try to get the vehicle nickname for better log identification
-                                    vehicle_nickname = vehicle.get("nickname", "Unknown")
-                                    vehicle_model = f"{vehicle.get('modelYear', '')} {vehicle.get('carlineName', '')}".strip()
-                                    vehicle_info = f"{vehicle_nickname} ({vehicle_model})" if vehicle_nickname else vehicle_model or vin
-                                    
-                                    _LOGGER.info("Retrieved health report for vehicle: %s", vehicle_info)
-                                    
-                                    report_result = health_report
-                                    success = True
-                                    
-                                    # Store as last successful report
-                                    self.last_successful_reports[vin] = health_report
-                                    
-                                    # Log full health report in discovery mode
-                                    if self.discovery_mode:
-                                        _LOGGER.warning(
-                                            "DISCOVERY MODE - Health Report for vehicle: %s", vehicle_info
-                                        )
-                                        # Log the full JSON structure for discovery
-                                        _LOGGER.warning(
-                                            json.dumps(health_report, indent=4, default=str)
-                                        )
-                                        
-                                        # Process each top-level section to help with entity creation
-                                        for section, section_data in health_report.items():
-                                            if isinstance(section_data, dict):
-                                                _LOGGER.warning(
-                                                    "DISCOVERY MODE - Section '%s' for %s contains the following potential sensors:", 
-                                                    section,
-                                                    vehicle_info
-                                                )
-                                                # Log all keys and their data types for each section
-                                                for key, value in section_data.items():
-                                                    data_type = type(value).__name__
-                                                    sample = str(value)
-                                                    if len(sample) > 100:
-                                                        sample = sample[:100] + "..."
-                                                    _LOGGER.warning(
-                                                        "   - %s: %s (type: %s, sample: %s)",
-                                                        key, 
-                                                        key.replace("_", " ").title(),
-                                                        data_type,
-                                                        sample
-                                                    )
-                                    
-                                    # Reset failure counter for successful requests
-                                    self.vehicle_failures[vin] = 0
-                                else:
-                                    _LOGGER.warning(
-                                        "Health report for %s has unexpected format: %s (attempt %d of %d)", 
-                                        vehicle_info, health_report.get("resultCode", "No resultCode"),
-                                        attempts, self.max_attempts
-                                    )
-                            else:
-                                _LOGGER.warning(
-                                    "Empty health report for %s (attempt %d of %d)", 
-                                    vehicle_info, attempts, self.max_attempts
-                                )
-                                
-                            # Delay before retry if needed
-                            if not success and attempts < self.max_attempts:
-                                retry_delay = self.endpoint_interval * 2  # Longer delay for retries
-                                _LOGGER.debug("Waiting %.1fs before retry...", retry_delay)
-                                await asyncio.sleep(retry_delay)
-                                
-                        except asyncio.TimeoutError:
-                            _LOGGER.error(
-                                "Timeout getting health report for %s (attempt %d of %d)", 
-                                vehicle_info, attempts, self.max_attempts
-                            )
-                            
-                            # Delay before retry if needed
-                            if attempts < self.max_attempts:
-                                retry_delay = self.endpoint_interval * 3  # Even longer delay after timeout
-                                _LOGGER.debug("Waiting %.1fs before retry after timeout...", retry_delay)
-                                await asyncio.sleep(retry_delay)
-                                
-                        except MazdaException as mazda_ex:
-                            _LOGGER.error(
-                                "Mazda API error for %s (attempt %d of %d): %s", 
-                                vehicle_info, attempts, self.max_attempts, mazda_ex
-                            )
-                            # Some API errors shouldn't be retried
-                            if "operation is not supported" in str(mazda_ex).lower():
-                                _LOGGER.warning("Operation not supported for this vehicle, not retrying")
-                                break
-                                
-                            # Delay before retry if needed
-                            if attempts < self.max_attempts:
-                                retry_delay = self.endpoint_interval * 2
-                                _LOGGER.debug("Waiting %.1fs before retry...", retry_delay)
-                                await asyncio.sleep(retry_delay)
-                                
-                        except Exception as ex:
-                            _LOGGER.error(
-                                "Error getting health report for %s (attempt %d of %d): %s", 
-                                vehicle_info, attempts, self.max_attempts, ex
-                            )
-                            # Delay before retry if needed
-                            if attempts < self.max_attempts:
-                                retry_delay = self.endpoint_interval * 2
-                                _LOGGER.debug("Waiting %.1fs before retry...", retry_delay)
-                                await asyncio.sleep(retry_delay)
-                    
-                    # After attempts, decide what to store
-                    if success and report_result:
-                        result[vin] = report_result
-                    elif vin in self.last_successful_reports:
-                        _LOGGER.info("Using cached health report for %s after %d failed attempts", 
-                                   vehicle_info, attempts)
-                        result[vin] = self.last_successful_reports[vin]
-                        # Increment failure counter
-                        self.vehicle_failures[vin] = self.vehicle_failures.get(vin, 0) + 1
-                    else:
-                        _LOGGER.error("No health report available for %s after %d attempts", 
-                                    vehicle_info, attempts)
-                        # Increment failure counter
-                        self.vehicle_failures[vin] = self.vehicle_failures.get(vin, 0) + 1
-                
-                # Check if any vehicles were processed successfully
-                if not result:
-                    _LOGGER.warning("No health reports available for any vehicles")
-                    raise UpdateFailed("Failed to get health report for any vehicle")
-                
-                # Log vehicle failure statistics
-                for vin, failures in self.vehicle_failures.items():
-                    if failures > 0:
-                        vehicle_info = "Unknown Vehicle"
-                        # Try to find vehicle info from stored vehicle data
-                        for entry_id, data in hass.data[DOMAIN].items():
-                            if DATA_COORDINATOR in data and data[DATA_COORDINATOR].data:
-                                for vehicle in data[DATA_COORDINATOR].data:
-                                    if vehicle.get("vin") == vin:
-                                        nickname = vehicle.get("nickname", "Unknown")
-                                        model = f"{vehicle.get('modelYear', '')} {vehicle.get('carlineName', '')}".strip()
-                                        vehicle_info = f"{nickname} ({model})" if nickname else model or vin
-                                        break
+                    try:
+                        _LOGGER.debug("Fetching health report for %s: %s (VIN: %s)", 
+                                      model, nickname, vin)
                         
-                        _LOGGER.warning("%s has %d consecutive health report failures", 
-                                     vehicle_info, failures)
+                        # Fetch health report with timeout
+                        raw_data = await with_timeout(
+                            lambda: self.client.get_health_report(vehicle_id),
+                            timeout_seconds=self.health_timeout
+                        )
+                        
+                        if raw_data:
+                            if self.debug_mode:
+                                _LOGGER.debug("Health report data for %s: %s", 
+                                            vin, sanitize_sensitive_data(raw_data))
+                            
+                            # Store result by VIN for sensor access
+                            results[vin] = raw_data
+                            _LOGGER.info("Successfully fetched health report for %s %s", 
+                                        model, nickname)
+                        else:
+                            _LOGGER.warning("Empty health report received for %s %s", 
+                                           model, nickname)
+                    
+                    except Exception as ex:
+                        _LOGGER.warning("Failed to get health report for %s %s: %s", 
+                                        model, nickname, ex)
                 
-                return result
-            except MazdaAuthenticationException as ex:
-                raise ConfigEntryAuthFailed(f"Authentication failed: {ex}") from ex
-            except UpdateFailed:
-                # Re-raise UpdateFailed exceptions
-                raise
-            except Exception as ex:
-                _LOGGER.error("Unexpected error in health report coordinator: %s", ex)
-                # Return existing data on unexpected errors to prevent losing all data
-                return self.data if self.data else {}
-            finally:
-                # Always reset the refreshing flag when done
-                self.is_refreshing = False
+                if not results:
+                    _LOGGER.warning("No health report data could be fetched for any vehicle")
+                
+                return results
+                
+            except Exception as error:
+                _LOGGER.error("Error in health report coordinator: %s", error)
+                raise UpdateFailed(f"Error fetching health reports: {error}") from error
 
     coordinator = MazdaVehicleUpdateCoordinator(hass, client, entry)
     

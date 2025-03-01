@@ -38,9 +38,23 @@ class MazdaBinarySensorEntityDescription(
 
 def _plugged_in_supported(data):
     """Determine if 'plugged in' binary sensor is supported."""
-    return (
-        data["isElectric"] and data["evStatus"]["chargeInfo"]["pluggedIn"] is not None
-    )
+    try:
+        if not data or not data.get("isElectric", False):
+            return False
+            
+        # Check if vehicle has ev status and charge info
+        ev_status = data.get("evStatus", {})
+        if not ev_status:
+            return False
+            
+        charge_info = ev_status.get("chargeInfo", {})
+        if not charge_info:
+            return False
+            
+        # Only return True if pluggedIn field exists
+        return "pluggedIn" in charge_info
+    except (KeyError, TypeError, AttributeError):
+        return False
 
 
 BINARY_SENSOR_ENTITIES = [
@@ -49,49 +63,49 @@ BINARY_SENSOR_ENTITIES = [
         translation_key="driver_door",
         icon="mdi:car-door",
         device_class=BinarySensorDeviceClass.DOOR,
-        value_fn=lambda data: data["status"]["doors"]["driverDoorOpen"],
+        value_fn=lambda data: data.get("status", {}).get("doors", {}).get("driverDoorOpen", False) if data else False,
     ),
     MazdaBinarySensorEntityDescription(
         key="passenger_door",
         translation_key="passenger_door",
         icon="mdi:car-door",
         device_class=BinarySensorDeviceClass.DOOR,
-        value_fn=lambda data: data["status"]["doors"]["passengerDoorOpen"],
+        value_fn=lambda data: data.get("status", {}).get("doors", {}).get("passengerDoorOpen", False) if data else False,
     ),
     MazdaBinarySensorEntityDescription(
         key="rear_left_door",
         translation_key="rear_left_door",
         icon="mdi:car-door",
         device_class=BinarySensorDeviceClass.DOOR,
-        value_fn=lambda data: data["status"]["doors"]["rearLeftDoorOpen"],
+        value_fn=lambda data: data.get("status", {}).get("doors", {}).get("rearLeftDoorOpen", False) if data else False,
     ),
     MazdaBinarySensorEntityDescription(
         key="rear_right_door",
         translation_key="rear_right_door",
         icon="mdi:car-door",
         device_class=BinarySensorDeviceClass.DOOR,
-        value_fn=lambda data: data["status"]["doors"]["rearRightDoorOpen"],
+        value_fn=lambda data: data.get("status", {}).get("doors", {}).get("rearRightDoorOpen", False) if data else False,
     ),
     MazdaBinarySensorEntityDescription(
         key="trunk",
         translation_key="trunk",
         icon="mdi:car-back",
         device_class=BinarySensorDeviceClass.DOOR,
-        value_fn=lambda data: data["status"]["doors"]["trunkOpen"],
+        value_fn=lambda data: data.get("status", {}).get("doors", {}).get("trunkOpen", False) if data else False,
     ),
     MazdaBinarySensorEntityDescription(
         key="hood",
         translation_key="hood",
         icon="mdi:car",
         device_class=BinarySensorDeviceClass.DOOR,
-        value_fn=lambda data: data["status"]["doors"]["hoodOpen"],
+        value_fn=lambda data: data.get("status", {}).get("doors", {}).get("hoodOpen", False) if data and data.get("status") and data.get("status").get("doors") else False,
     ),
     MazdaBinarySensorEntityDescription(
         key="ev_plugged_in",
         translation_key="ev_plugged_in",
         device_class=BinarySensorDeviceClass.PLUG,
         is_supported=_plugged_in_supported,
-        value_fn=lambda data: data["evStatus"]["chargeInfo"]["pluggedIn"],
+        value_fn=lambda data: data.get("evStatus", {}).get("chargeInfo", {}).get("pluggedIn", False) if data and data.get("evStatus") and data.get("evStatus").get("chargeInfo") else False,
     ),
 ]
 
@@ -128,4 +142,13 @@ class MazdaBinarySensorEntity(MazdaEntity, BinarySensorEntity):
     @property
     def is_on(self):
         """Return the state of the binary sensor."""
-        return self.entity_description.value_fn(self.data)
+        try:
+            if not self.data:
+                return None
+            return self.entity_description.value_fn(self.data)
+        except (KeyError, TypeError, AttributeError) as e:
+            # Log error but don't crash
+            import logging
+            _LOGGER = logging.getLogger(__name__)
+            _LOGGER.error("Error getting binary sensor state for %s: %s", self.entity_description.key, str(e))
+            return None
