@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+import logging
+import asyncio
+import aiohttp
+from typing import Any, Final
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -21,8 +24,10 @@ from . import (
     MazdaException,
     MazdaTokenExpiredException,
 )
-from .const import DATA_CLIENT, DATA_COORDINATOR, DOMAIN
+from .const import DATA_CLIENT, DATA_COORDINATOR, DATA_HEALTH_COORDINATOR, DOMAIN
 from .pymazda.exceptions import MazdaLoginFailedException
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def handle_button_press(
@@ -33,18 +38,63 @@ async def handle_button_press(
 ) -> None:
     """Handle a press for a Mazda button entity."""
     api_method = getattr(client, key)
+    _LOGGER = logging.getLogger(__name__)
 
-    try:
-        await api_method(vehicle_id)
-    except (
-        MazdaException,
-        MazdaAuthenticationException,
-        MazdaAccountLockedException,
-        MazdaTokenExpiredException,
-        MazdaAPIEncryptionException,
-        MazdaLoginFailedException,
-    ) as ex:
-        raise HomeAssistantError(ex) from ex
+    # Number of retries for transient errors
+    MAX_RETRIES: Final = 2
+    retry_count = 0
+
+    while retry_count <= MAX_RETRIES:
+        try:
+            await api_method(vehicle_id)
+            # If successful, break out of the retry loop
+            break
+        except (
+            MazdaException,
+            MazdaAuthenticationException,
+            MazdaAccountLockedException,
+            MazdaTokenExpiredException,
+            MazdaAPIEncryptionException,
+            MazdaLoginFailedException,
+        ) as ex:
+            raise HomeAssistantError(ex) from ex
+        except aiohttp.client_exceptions.ServerDisconnectedError as ex:
+            if retry_count < MAX_RETRIES:
+                _LOGGER.warning(
+                    "Server disconnected during %s operation. Retrying... (%d/%d)",
+                    key,
+                    retry_count + 1,
+                    MAX_RETRIES,
+                )
+                retry_count += 1
+                # Add exponential backoff
+                await asyncio.sleep(2 ** retry_count)
+            else:
+                _LOGGER.error(
+                    "Server disconnected during %s operation after %d retries. Check your network connection and the Mazda API status.",
+                    key,
+                    MAX_RETRIES,
+                )
+                raise HomeAssistantError(f"Failed to {key} after multiple retries: {ex}") from ex
+        except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
+            if retry_count < MAX_RETRIES:
+                _LOGGER.warning(
+                    "Connection error during %s operation. Retrying... (%d/%d)",
+                    key,
+                    retry_count + 1,
+                    MAX_RETRIES,
+                )
+                retry_count += 1
+                # Add exponential backoff
+                await asyncio.sleep(2 ** retry_count)
+            else:
+                _LOGGER.error(
+                    "Connection error during %s operation after %d retries: %s",
+                    key,
+                    MAX_RETRIES,
+                    str(ex),
+                )
+                raise HomeAssistantError(f"Connection error during {key} operation: {ex}") from ex
 
 
 async def handle_refresh_vehicle_status(
@@ -57,6 +107,48 @@ async def handle_refresh_vehicle_status(
     await handle_button_press(client, key, vehicle_id, coordinator)
 
     await coordinator.async_request_refresh()
+
+
+async def handle_refresh_health_report(
+    client: MazdaAPIClient,
+    key: str,
+    vehicle_id: int,
+    coordinator: DataUpdateCoordinator,
+) -> None:
+    """Handle a request to refresh the health report."""
+    # Get the current entry ID from the coordinator
+    entry_id = None
+    for entry_id, entry_data in coordinator.hass.data[DOMAIN].items():
+        if DATA_COORDINATOR in entry_data and entry_data[DATA_COORDINATOR] == coordinator:
+            break
+    
+    if not entry_id:
+        _LOGGER.error("Could not find config entry ID for coordinator")
+        raise HomeAssistantError("Configuration entry not found")
+    
+    # Get the health coordinator directly from the current entry
+    health_coordinator = coordinator.hass.data[DOMAIN][entry_id].get(DATA_HEALTH_COORDINATOR)
+    
+    if not health_coordinator:
+        _LOGGER.error("Health coordinator not found in current config entry")
+        raise HomeAssistantError("Health coordinator not available")
+    
+    try:
+        # Try to get the VIN for better logging
+        vin = "unknown"
+        for vehicle in coordinator.data:
+            if vehicle.get("id") == vehicle_id:
+                vin = vehicle.get("vin", "unknown")
+                break
+        
+        _LOGGER.info("Triggering manual refresh of health report for vehicle %s (ID: %s)", vin, vehicle_id)
+        
+        # Request refresh of health data
+        await health_coordinator.async_request_refresh()
+        _LOGGER.info("Health report refresh completed for vehicle %s", vin)
+    except Exception as ex:
+        _LOGGER.error("Error refreshing health report: %s", ex)
+        raise HomeAssistantError(f"Failed to refresh health report: {ex}") from ex
 
 
 @dataclass
@@ -102,7 +194,12 @@ BUTTON_ENTITIES = [
         translation_key="refresh_vehicle_status",
         icon="mdi:refresh",
         async_press=handle_refresh_vehicle_status,
-        is_supported=lambda data: data["isElectric"],
+    ),
+    MazdaButtonEntityDescription(
+        key="refresh_health_report",
+        translation_key="refresh_health_report",
+        icon="mdi:car-wrench",
+        async_press=handle_refresh_health_report,
     ),
 ]
 
@@ -112,16 +209,24 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the button platform."""
+    """Set up the Mazda button platform."""
     client = hass.data[DOMAIN][config_entry.entry_id][DATA_CLIENT]
     coordinator = hass.data[DOMAIN][config_entry.entry_id][DATA_COORDINATOR]
 
-    async_add_entities(
-        MazdaButtonEntity(client, coordinator, index, description)
-        for index, data in enumerate(coordinator.data)
-        for description in BUTTON_ENTITIES
-        if description.is_supported(data)
-    )
+    entities = []
+    for index, data in enumerate(coordinator.data):
+        for description in BUTTON_ENTITIES:
+            if description.is_supported(data):
+                entities.append(
+                    MazdaButtonEntity(
+                        client,
+                        coordinator,
+                        index,
+                        description,
+                    )
+                )
+
+    async_add_entities(entities)
 
 
 class MazdaButtonEntity(MazdaEntity, ButtonEntity):

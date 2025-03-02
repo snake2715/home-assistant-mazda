@@ -8,6 +8,8 @@ import time
 from urllib.parse import urlencode
 
 import aiohttp
+from aiohttp.client_exceptions import ServerDisconnectedError, ClientConnectorError, ClientOSError, ClientResponseError
+from aiohttp import ClientTimeout, ClientError
 
 from .crypto_utils import (
     decrypt_aes128cbc_buffer_to_str,
@@ -92,8 +94,7 @@ APP_OS = "Android"
 APP_VERSION = "8.5.2"
 USHER_SDK_VERSION = "11.3.0700.001"
 
-MAX_RETRIES = 4
-
+MAX_RETRIES = 8  # Increased from 4 to allow more retries
 
 class Connection:
     """Main class for handling MyMazda API connection."""
@@ -122,11 +123,45 @@ class Connection:
         self.sensor_data_builder = SensorDataBuilder()
 
         if websession is None:
-            self._session = aiohttp.ClientSession()
+            self._create_session()
         else:
             self._session = websession
 
         self.logger = logging.getLogger(__name__)
+
+    def _create_session(self):
+        """Create a new aiohttp session with appropriate headers"""
+        if hasattr(self, '_session') and not self._session.closed:
+            # Close existing session if there is one
+            try:
+                self._session.close()
+            except (AttributeError, OSError) as e:
+                self.logger.debug(f"Error closing previous session: {e}")
+                pass
+                
+        # Create new session with default headers
+        self._session = aiohttp.ClientSession(
+            headers={
+                "device-id": self.base_api_device_id,
+                "app-code": self.app_code,
+                "user-agent": USER_AGENT_BASE_API,
+                "app-version": APP_VERSION,
+                "app-unique-id": APP_PACKAGE_ID,
+            }
+        )
+        self.logger.debug("Created new aiohttp session")
+
+    async def _recover_session(self):
+        """Recover from connection issues by recreating the session and logging in again"""
+        self.logger.info("Recovering session due to persistent connection issues")
+        # Create a new session
+        self._create_session()
+        # Reset login state
+        self.access_token = None
+        self.access_token_expiration_ts = None
+        # Try to log in again
+        await self.login()
+        self.logger.info("Session recovery complete")
 
     def __get_timestamp_str_ms(self):
         return str(int(round(time.time() * 1000)))
@@ -234,7 +269,12 @@ class Connection:
         num_retries=0,
     ):
         if num_retries > MAX_RETRIES:
-            raise MazdaException("Request exceeded max number of retries")
+            self.logger.error("Request to %s exceeded max retries (%d). Giving up.", uri, MAX_RETRIES)
+            if "getNickName" in uri:
+                # Return empty response for non-critical endpoints
+                self.logger.warning("Non-critical endpoint failed (getNickName), returning empty result")
+                return {"resultCode": "999", "carlineDesc": "", "visitNo": ""}
+            raise MazdaException(f"Request exceeded max number of retries ({MAX_RETRIES})")
 
         if needs_keys:
             await self.__ensure_keys_present()
@@ -244,14 +284,67 @@ class Connection:
         retry_message = (
             (" - attempt #" + str(num_retries + 1)) if (num_retries > 0) else ""
         )
-        self.logger.debug(
-            f"Sending {method} request to {uri}{retry_message}"  # noqa: G004
-        )  # noqa: G004
+        if "getHealthReport" in uri:
+            self.logger.debug(
+                f"Sending {method} request to {uri}{retry_message} for health report discovery"  # noqa: G004
+            )
+        else:
+            self.logger.debug(
+                f"Sending {method} request to {uri}{retry_message}"  # noqa: G004
+            )  # noqa: G004
 
         try:
             return await self.__send_api_request(
                 method, uri, query_dict, body_dict, needs_keys, needs_auth
             )
+        except (ClientError, OSError, asyncio.TimeoutError) as e:
+            error_details = str(e) if str(e) else type(e).__name__
+            retry_after = min(5 * (num_retries + 1), 30)  # Progressive backoff, max 30 seconds
+            
+            # Log connection errors with better error details
+            if "getVecBaseInfos" in uri and num_retries > 5:
+                # For vehicle info requests, log special message after many attempts
+                self.logger.error(
+                    f"Persistent connection issues with Mazda servers when requesting vehicle information. "
+                    f"This may indicate temporary API unavailability. Error: {error_details}"
+                )
+            else:
+                self.logger.warning(
+                    f"Server connection error: {error_details}. Waiting {retry_after} seconds before retry."
+                )
+                
+            # For server disconnections, log the error
+            if "disconnected" in str(e).lower():
+                self.logger.error(f"Connection error during API request to {uri}: Server disconnected")
+                
+            # If we've already tried many times, add more delay to prevent excessive retries
+            if num_retries >= 5:
+                retry_after = min(retry_after + 10, 60)  # Add extra delay after many retries, cap at 60s
+                
+            await asyncio.sleep(retry_after)
+            
+            # Limit maximum retries to prevent infinite loops
+            max_retries = 12  # Approximately 5-10 minutes of retrying with progressive backoff
+            if num_retries >= max_retries:
+                self.logger.error(f"Maximum retries ({max_retries}) exceeded for {uri}. Giving up.")
+                raise MazdaException(f"Failed to connect to Mazda servers after {max_retries} attempts")
+                
+            # Recover session if we've tried many times
+            if num_retries >= 6:
+                await self._recover_session()
+                
+            return await self.__api_request_retry(
+                method,
+                uri,
+                query_dict,
+                body_dict,
+                needs_keys,
+                needs_auth,
+                num_retries + 1,
+            )
+        except ClientResponseError as e:
+            self.logger.error(f"Request to {uri} failed with status {e.status}: {e.message}")
+            raise  # Re-raise for the retry mechanism to handle
         except MazdaAPIEncryptionException:
             self.logger.info(
                 "Server reports request was not encrypted properly. Retrieving new encryption keys."
@@ -357,47 +450,88 @@ class Connection:
                 original_body_str, timestamp
             )
 
-        response = await self._session.request(
-            method,
-            self.base_url + uri,
-            headers=headers,
-            data=encrypted_body_Str,
-            ssl=ssl_context,
-        )
+        try:
+            # Add timeout parameter to prevent indefinite hanging
+            # Adjust timeout based on endpoint type
+            timeout_seconds = 30  # Default timeout
+            
+            # Set timeout based on request type
+            if "getNickName" in uri:
+                timeout_seconds = 15  # Shorter timeout for nickname requests
+            elif "getVecBaseInfos" in uri:
+                timeout_seconds = 45  # Longer timeout for vehicle base info
+            elif "getHealthReport" in uri:
+                timeout_seconds = 60  # Even longer timeout for health reports
+            elif "doorUnlock" in uri or "doorLock" in uri:
+                timeout_seconds = 45  # Longer timeout for door control commands
+            
+            # Create a client timeout object
+            timeout = ClientTimeout(total=timeout_seconds)
+            
+            response = await self._session.request(
+                method,
+                self.base_url + uri,
+                headers=headers,
+                data=encrypted_body_Str,
+                ssl=ssl_context,
+                timeout=timeout
+            )
 
-        response_json = await response.json()
+            response_json = await response.json()
 
-        if response_json.get("state") == "S":
-            if "checkVersion" in uri:
-                return self.__decrypt_payload_using_app_code(response_json["payload"])
-            else:
-                decrypted_payload = self.__decrypt_payload_using_key(
-                    response_json["payload"]
+            if response_json.get("state") == "S":
+                if "checkVersion" in uri:
+                    return self.__decrypt_payload_using_app_code(response_json["payload"])
+                else:
+                    decrypted_payload = self.__decrypt_payload_using_key(
+                        response_json["payload"]
+                    )
+                    if "getHealthReport" in uri:
+                        try:
+                            if isinstance(decrypted_payload, dict):
+                                healthReportData = decrypted_payload.get("healthReportData", {})
+                                vhcle = healthReportData.get("vhcle", {})
+                                reportDate = vhcle.get("reportDate", "Unknown")
+                                reportItems = vhcle.get("reportItems", [])
+                                self.logger.debug(
+                                    f"Health report response for date {reportDate}: contains {len(reportItems)} report items"
+                                )
+                                # Log the keys of the first few report items for debugging
+                                if reportItems and len(reportItems) > 0:
+                                    item_keys = []
+                                    for i, item in enumerate(reportItems[:3]):  # Log first 3 items
+                                        item_keys.append(f"Item {i+1}: {list(item.keys())}")
+                                    self.logger.debug(f"Sample report items: {', '.join(item_keys)}")
+                        except (AttributeError, KeyError, TypeError, ValueError, IndexError) as e:
+                            self.logger.debug(f"Error parsing health report for detailed logging: {e}")
+                    
+                    self.logger.debug("Response payload: %s", decrypted_payload)
+                    return decrypted_payload
+            elif response_json.get("errorCode") == 600001:
+                raise MazdaAPIEncryptionException("Server rejected encrypted request")
+            elif response_json.get("errorCode") == 600002:
+                raise MazdaTokenExpiredException("Token expired")
+            elif (
+                response_json.get("errorCode") == 920000
+                and response_json.get("extraCode") == "400S01"
+            ):
+                raise MazdaRequestInProgressException(
+                    "Request already in progress, please wait and try again"
                 )
-                self.logger.debug("Response payload: %s", decrypted_payload)
-                return decrypted_payload
-        elif response_json.get("errorCode") == 600001:
-            raise MazdaAPIEncryptionException("Server rejected encrypted request")
-        elif response_json.get("errorCode") == 600002:
-            raise MazdaTokenExpiredException("Token expired")
-        elif (
-            response_json.get("errorCode") == 920000
-            and response_json.get("extraCode") == "400S01"
-        ):
-            raise MazdaRequestInProgressException(
-                "Request already in progress, please wait and try again"
-            )
-        elif (
-            response_json.get("errorCode") == 920000
-            and response_json.get("extraCode") == "400S11"
-        ):
-            raise MazdaException(
-                "The engine can only be remotely started 2 consecutive times. Please drive the vehicle to reset the counter."
-            )
-        elif "error" in response_json:
-            raise MazdaException("Request failed: " + response_json["error"])
-        else:
-            raise MazdaException("Request failed for an unknown reason")
+            elif (
+                response_json.get("errorCode") == 920000
+                and response_json.get("extraCode") == "400S11"
+            ):
+                raise MazdaException(
+                    "The engine can only be remotely started 2 consecutive times. Please drive the vehicle to reset the counter."
+                )
+            elif "error" in response_json:
+                raise MazdaException("Request failed: " + response_json["error"])
+            else:
+                raise MazdaException("Request failed for an unknown reason")
+        except (ServerDisconnectedError, ClientConnectorError, ClientOSError) as e:
+            self.logger.error(f"Connection error during API request to {uri}: {str(e)}")
+            raise  # Re-raise for the retry mechanism to handle
 
     async def __ensure_keys_present(self):
         if self.enc_key is None or self.sign_key is None:

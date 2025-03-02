@@ -46,9 +46,25 @@ class MazdaDeviceTracker(MazdaEntity, TrackerEntity):
     @property
     def latitude(self):
         """Return latitude value of the device."""
-        return self.data["status"]["latitude"]
+        try:
+            if not self.data or not self.data.get("status"):
+                return None
+            return self.data["status"].get("latitude")
+        except (KeyError, TypeError, AttributeError) as e:
+            import logging
+            _LOGGER = logging.getLogger(__name__)
+            _LOGGER.error("Error getting latitude for device tracker: %s", str(e))
+            return None
 
     @property
     def longitude(self):
         """Return longitude value of the device."""
-        return self.data["status"]["longitude"]
+        try:
+            if not self.data or not self.data.get("status"):
+                return None
+            return self.data["status"].get("longitude")
+        except (KeyError, TypeError, AttributeError) as e:
+            import logging
+            _LOGGER = logging.getLogger(__name__)
+            _LOGGER.error("Error getting longitude for device tracker: %s", str(e))
+            return None

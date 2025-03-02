@@ -15,9 +15,54 @@
                 "data": {
                     "email": "Email",
                     "password": "Password",
-                    "region": "Region"
+                    "region": "Region",
+                    "refresh_interval": "Status Update Frequency (minutes)",
+                    "vehicle_interval": "Delay Between Vehicles (seconds)",
+                    "endpoint_interval": "API Throttling Delay (seconds)",
+                    "health_report_interval": "Health Report Frequency (minutes)",
+                    "health_vehicle_interval": "Health Report Vehicle Delay (seconds)",
+                    "max_retries": "Maximum Retry Attempts",
+                    "retry_delay": "Initial Retry Delay (seconds)",
+                    "max_retry_backoff": "Maximum Retry Backoff (seconds)"
+                },
+                "data_description": {
+                    "refresh_interval": "How often to update vehicle status (5-1440 min)",
+                    "vehicle_interval": "Delay between processing each vehicle (0-60 sec)",
+                    "endpoint_interval": "Delay between API calls for same vehicle (0-30 sec)",
+                    "health_report_interval": "How often to retrieve health reports (1-1440 min)",
+                    "health_vehicle_interval": "Delay between health report calls (5-300 sec)",
+                    "max_retries": "Number of times to retry failed API requests (1-10)",
+                    "retry_delay": "Initial delay between retry attempts (0.5-5 sec)",
+                    "max_retry_backoff": "Maximum delay between retries with backoff (5-120 sec)"
                 },
                 "description": "Please enter the email address and password you use to log into the MyMazda mobile app."
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "data": {
+                    "refresh_interval": "Status Update Frequency (minutes)",
+                    "vehicle_interval": "Delay Between Vehicles (seconds)",
+                    "endpoint_interval": "API Throttling Delay (seconds)",
+                    "health_report_interval": "Health Report Frequency (minutes)",
+                    "health_vehicle_interval": "Health Report Vehicle Delay (seconds)",
+                    "max_retries": "Maximum Retry Attempts",
+                    "retry_delay": "Initial Retry Delay (seconds)",
+                    "max_retry_backoff": "Maximum Retry Backoff (seconds)"
+                },
+                "data_description": {
+                    "refresh_interval": "How often to update vehicle status (5-1440 min)",
+                    "vehicle_interval": "Delay between processing each vehicle (0-60 sec)",
+                    "endpoint_interval": "Delay between API calls for same vehicle (0-30 sec)",
+                    "health_report_interval": "How often to retrieve health reports (1-1440 min)",
+                    "health_vehicle_interval": "Delay between health report calls (5-300 sec)",
+                    "max_retries": "Number of times to retry failed API requests (1-10)",
+                    "retry_delay": "Initial delay between retry attempts (0.5-5 sec)",
+                    "max_retry_backoff": "Maximum delay between retries with backoff (5-120 sec)"
+                },
+                "description": "Adjust update frequencies and API throttling for your Mazda Connected Services."
             }
         }
     },
