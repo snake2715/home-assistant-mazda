@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 import logging
-from typing import Any
+from typing import Any, Dict, Optional
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -13,13 +14,44 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfLength, UnitOfPressure, UnitOfTime
+from homeassistant.const import (
+    PERCENTAGE,
+    UnitOfLength,
+    UnitOfPressure,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MazdaEntity
-from .const import DATA_CLIENT, DATA_COORDINATOR, DATA_HEALTH_COORDINATOR, DOMAIN
+from .const import (
+    DATA_CLIENT,
+    DATA_COORDINATOR,
+    DATA_HEALTH_COORDINATOR,
+    DOMAIN,
+    TPMS_WARNING_DESCRIPTIONS,
+)
+
+# Import TPMS sensor functionality
+from .tpms_sensor import (
+    _safe_get_tpms_status,
+    _safe_get_tpms_health_data,
+    _tpms_supported,
+    _fl_tire_pressure_supported as _front_left_tire_pressure_supported,
+    _fr_tire_pressure_supported as _front_right_tire_pressure_supported, 
+    _rl_tire_pressure_supported as _rear_left_tire_pressure_supported,
+    _rr_tire_pressure_supported as _rear_right_tire_pressure_supported,
+    _tpms_status_supported,
+    _fl_tire_pressure_value as _front_left_tire_pressure_value,
+    _fr_tire_pressure_value as _front_right_tire_pressure_value,
+    _rl_tire_pressure_value as _rear_left_tire_pressure_value,
+    _rr_tire_pressure_value as _rear_right_tire_pressure_value,
+    _tpms_status_value,
+    _get_tire_warning_level,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,54 +100,6 @@ def _fuel_distance_remaining_supported(data):
     return (not data["isElectric"]) and (
         data.get("status", {}).get("fuelDistanceRemainingKm") is not None
     )
-
-
-def _front_left_tire_pressure_supported(data):
-    """Determine if front left tire pressure is supported."""
-    if data is None or data.get("status") is None:
-        return False
-    
-    tire_pressure = data["status"].get("tirePressure")
-    if tire_pressure is None:
-        return False
-        
-    return "frontLeftTirePressurePsi" in tire_pressure and tire_pressure["frontLeftTirePressurePsi"] is not None
-
-
-def _front_right_tire_pressure_supported(data):
-    """Determine if front right tire pressure is supported."""
-    if data is None or data.get("status") is None:
-        return False
-    
-    tire_pressure = data["status"].get("tirePressure")
-    if tire_pressure is None:
-        return False
-        
-    return "frontRightTirePressurePsi" in tire_pressure and tire_pressure["frontRightTirePressurePsi"] is not None
-
-
-def _rear_left_tire_pressure_supported(data):
-    """Determine if rear left tire pressure is supported."""
-    if data is None or data.get("status") is None:
-        return False
-    
-    tire_pressure = data["status"].get("tirePressure")
-    if tire_pressure is None:
-        return False
-        
-    return "rearLeftTirePressurePsi" in tire_pressure and tire_pressure["rearLeftTirePressurePsi"] is not None
-
-
-def _rear_right_tire_pressure_supported(data):
-    """Determine if rear right tire pressure is supported."""
-    if data is None or data.get("status") is None:
-        return False
-    
-    tire_pressure = data["status"].get("tirePressure")
-    if tire_pressure is None:
-        return False
-        
-    return "rearRightTirePressurePsi" in tire_pressure and tire_pressure["rearRightTirePressurePsi"] is not None
 
 
 def _ev_charge_level_supported(data):
@@ -170,6 +154,38 @@ def _ev_remaining_bev_range_supported(data):
         
     return "drivingRangeBevKm" in data["evStatus"]["chargeInfo"] and data["evStatus"]["chargeInfo"]["drivingRangeBevKm"] is not None
 
+def _engine_state_supported(data):
+    """Determine if the engine state sensor is supported for this vehicle."""
+    try:
+        if not data or not data.get("status"):
+            return False
+            
+        electrical = data["status"].get("electricalInformation")
+        if not electrical:
+            return False
+            
+        # Check if EngineState key exists
+        return "EngineState" in electrical
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def _power_control_status_supported(data):
+    """Determine if the power control status sensor is supported for this vehicle."""
+    try:
+        if not data or not data.get("status"):
+            return False
+            
+        electrical = data["status"].get("electricalInformation")
+        if not electrical:
+            return False
+            
+        # Check if PowerControlStatus key exists
+        return "PowerControlStatus" in electrical
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
 def _fuel_distance_remaining_value(data):
     """Get the fuel distance remaining value."""
     return round(data["status"]["fuelDistanceRemainingKm"])
@@ -179,26 +195,6 @@ def _odometer_value(data):
     """Get the odometer value."""
     # In order to match the behavior of the Mazda mobile app, we always round down
     return int(data["status"]["odometerKm"])
-
-
-def _front_left_tire_pressure_value(data):
-    """Get the front left tire pressure value."""
-    return round(data["status"]["tirePressure"]["frontLeftTirePressurePsi"])
-
-
-def _front_right_tire_pressure_value(data):
-    """Get the front right tire pressure value."""
-    return round(data["status"]["tirePressure"]["frontRightTirePressurePsi"])
-
-
-def _rear_left_tire_pressure_value(data):
-    """Get the rear left tire pressure value."""
-    return round(data["status"]["tirePressure"]["rearLeftTirePressurePsi"])
-
-
-def _rear_right_tire_pressure_value(data):
-    """Get the rear right tire pressure value."""
-    return round(data["status"]["tirePressure"]["rearRightTirePressurePsi"])
 
 
 def _ev_charge_level_value(data):
@@ -217,6 +213,43 @@ def _ev_remaining_range_bev_value(data):
     """Get the remaining range BEV value."""
     return round(data["evStatus"]["chargeInfo"]["drivingRangeBevKm"])
 
+def _engine_state_value(data):
+    """Get the engine state value."""
+    try:
+        if not data or not data.get("status"):
+            return None
+            
+        electrical = data["status"].get("electricalInformation")
+        if not electrical:
+            return None
+            
+        return electrical.get("EngineState")
+    except (KeyError, TypeError, AttributeError) as e:
+        # Log error but don't crash
+        import logging
+        _LOGGER = logging.getLogger(__name__)
+        _LOGGER.error("Error getting engine state: %s", str(e))
+        return None
+
+
+def _power_control_status_value(data):
+    """Get the power control status value."""
+    try:
+        if not data or not data.get("status"):
+            return None
+            
+        electrical = data["status"].get("electricalInformation")
+        if not electrical:
+            return None
+            
+        return electrical.get("PowerControlStatus")
+    except (KeyError, TypeError, AttributeError) as e:
+        # Log error but don't crash
+        import logging
+        _LOGGER = logging.getLogger(__name__)
+        _LOGGER.error("Error getting power control status: %s", str(e))
+        return None
+
 
 SENSOR_ENTITIES = [
     MazdaSensorEntityDescription(
@@ -226,7 +259,7 @@ SENSOR_ENTITIES = [
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         is_supported=_fuel_remaining_percentage_supported,
-        value=lambda data: data["status"]["fuelRemainingPercent"],
+        value=lambda data: data.get("status", {}).get("fuelRemainingPercent") if data else None,
     ),
     MazdaSensorEntityDescription(
         key="fuel_distance_remaining",
@@ -236,7 +269,7 @@ SENSOR_ENTITIES = [
         native_unit_of_measurement=UnitOfLength.KILOMETERS,
         state_class=SensorStateClass.MEASUREMENT,
         is_supported=_fuel_distance_remaining_supported,
-        value=_fuel_distance_remaining_value,
+        value=lambda data: data.get("status", {}).get("fuelDistanceRemainingKm") if data else None,
     ),
     MazdaSensorEntityDescription(
         key="odometer",
@@ -245,8 +278,8 @@ SENSOR_ENTITIES = [
         device_class=SensorDeviceClass.DISTANCE,
         native_unit_of_measurement=UnitOfLength.KILOMETERS,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        is_supported=lambda data: data["status"]["odometerKm"] is not None,
-        value=_odometer_value,
+        is_supported=lambda data: data.get("status", {}).get("odometerKm") is not None,
+        value=lambda data: int(data.get("status", {}).get("odometerKm")) if data else None,
     ),
     MazdaSensorEntityDescription(
         key="front_left_tire_pressure",
@@ -255,8 +288,8 @@ SENSOR_ENTITIES = [
         device_class=SensorDeviceClass.PRESSURE,
         native_unit_of_measurement=UnitOfPressure.PSI,
         state_class=SensorStateClass.MEASUREMENT,
-        is_supported=_front_left_tire_pressure_supported,
-        value=_front_left_tire_pressure_value,
+        is_supported=lambda data, health_data: _front_left_tire_pressure_supported(data, health_data),
+        value=lambda data, health_data: _front_left_tire_pressure_value(data, health_data),
     ),
     MazdaSensorEntityDescription(
         key="front_right_tire_pressure",
@@ -265,8 +298,8 @@ SENSOR_ENTITIES = [
         device_class=SensorDeviceClass.PRESSURE,
         native_unit_of_measurement=UnitOfPressure.PSI,
         state_class=SensorStateClass.MEASUREMENT,
-        is_supported=_front_right_tire_pressure_supported,
-        value=_front_right_tire_pressure_value,
+        is_supported=lambda data, health_data: _front_right_tire_pressure_supported(data, health_data),
+        value=lambda data, health_data: _front_right_tire_pressure_value(data, health_data),
     ),
     MazdaSensorEntityDescription(
         key="rear_left_tire_pressure",
@@ -275,8 +308,8 @@ SENSOR_ENTITIES = [
         device_class=SensorDeviceClass.PRESSURE,
         native_unit_of_measurement=UnitOfPressure.PSI,
         state_class=SensorStateClass.MEASUREMENT,
-        is_supported=_rear_left_tire_pressure_supported,
-        value=_rear_left_tire_pressure_value,
+        is_supported=lambda data, health_data: _rear_left_tire_pressure_supported(data, health_data),
+        value=lambda data, health_data: _rear_left_tire_pressure_value(data, health_data),
     ),
     MazdaSensorEntityDescription(
         key="rear_right_tire_pressure",
@@ -285,8 +318,8 @@ SENSOR_ENTITIES = [
         device_class=SensorDeviceClass.PRESSURE,
         native_unit_of_measurement=UnitOfPressure.PSI,
         state_class=SensorStateClass.MEASUREMENT,
-        is_supported=_rear_right_tire_pressure_supported,
-        value=_rear_right_tire_pressure_value,
+        is_supported=lambda data, health_data: _rear_right_tire_pressure_supported(data, health_data),
+        value=lambda data, health_data: _rear_right_tire_pressure_value(data, health_data),
     ),
     MazdaSensorEntityDescription(
         key="ev_charge_level",
@@ -295,7 +328,7 @@ SENSOR_ENTITIES = [
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         is_supported=_ev_charge_level_supported,
-        value=_ev_charge_level_value,
+        value=lambda data: data.get("evStatus", {}).get("chargeInfo", {}).get("batteryLevelPercentage") if data else None,
     ),
     MazdaSensorEntityDescription(
         key="ev_remaining_charging_time",
@@ -304,7 +337,7 @@ SENSOR_ENTITIES = [
         native_unit_of_measurement=UnitOfTime.MINUTES,
         state_class=SensorStateClass.MEASUREMENT,
         is_supported=_ev_remaining_charging_time_supported,
-        value=_ev_remaining_charging_time_value,
+        value=lambda data: data.get("evStatus", {}).get("chargeInfo", {}).get("basicChargeTimeMinutes") if data else None,
     ),
     MazdaSensorEntityDescription(
         key="ev_remaining_range",
@@ -314,7 +347,7 @@ SENSOR_ENTITIES = [
         native_unit_of_measurement=UnitOfLength.KILOMETERS,
         state_class=SensorStateClass.MEASUREMENT,
         is_supported=_ev_remaining_range_supported,
-        value=_ev_remaining_range_value,
+        value=lambda data: data.get("evStatus", {}).get("chargeInfo", {}).get("drivingRangeKm") if data else None,
     ),
     MazdaSensorEntityDescription(
         key="ev_remaining_range_bev",
@@ -324,7 +357,31 @@ SENSOR_ENTITIES = [
         native_unit_of_measurement=UnitOfLength.KILOMETERS,
         state_class=SensorStateClass.MEASUREMENT,
         is_supported=_ev_remaining_bev_range_supported,
-        value=_ev_remaining_range_bev_value,
+        value=lambda data: data.get("evStatus", {}).get("chargeInfo", {}).get("drivingRangeBevKm") if data else None,
+    ),
+    MazdaSensorEntityDescription(
+        key="engine_state",
+        translation_key="engine_state",
+        icon="mdi:engine",
+        state_class=SensorStateClass.MEASUREMENT,
+        is_supported=_engine_state_supported,
+        value=lambda data: data.get("status", {}).get("electricalInformation", {}).get("EngineState") if data else None,
+    ),
+    MazdaSensorEntityDescription(
+        key="power_control_status",
+        translation_key="power_control_status",
+        icon="mdi:car-electric",
+        state_class=SensorStateClass.MEASUREMENT,
+        is_supported=_power_control_status_supported,
+        value=lambda data: data.get("status", {}).get("electricalInformation", {}).get("PowerControlStatus") if data else None,
+    ),
+    MazdaSensorEntityDescription(
+        key="tpms_status",
+        translation_key="tpms_status",
+        icon="mdi:car-tire-alert",
+        state_class=SensorStateClass.MEASUREMENT,
+        is_supported=_tpms_status_supported,
+        value=_tpms_status_value,
     ),
 ]
 
@@ -337,6 +394,7 @@ async def async_setup_entry(
     """Set up the Mazda vehicle sensor platform."""
     client = hass.data[DOMAIN][config_entry.entry_id][DATA_CLIENT]
     coordinator = hass.data[DOMAIN][config_entry.entry_id][DATA_COORDINATOR]
+    health_coordinator = hass.data[DOMAIN][config_entry.entry_id].get(DATA_HEALTH_COORDINATOR)
 
     entities = []
     
@@ -350,16 +408,36 @@ async def async_setup_entry(
         
         # Check which sensors are supported for this vehicle
         for description in SENSOR_ENTITIES:
-            if description.is_supported(vehicle):
-                _LOGGER.debug(f"Adding sensor {description.key} for vehicle {vin}")
-                entities.append(
-                    MazdaSensorEntity(
-                        client=client,
-                        coordinator=coordinator,
-                        index=index,
-                        description=description,
+            try:
+                # Check if the sensor is supported
+                is_supported = False
+                
+                # Get the required parameter count for the is_supported function
+                # Regular sensors take 1 parameter, TPMS sensors take 2
+                param_count = description.is_supported.__code__.co_argcount
+                
+                if param_count == 1:
+                    # Regular sensor with 1 parameter
+                    is_supported = description.is_supported(vehicle)
+                elif param_count == 2:
+                    # TPMS sensor with 2 parameters
+                    is_supported = description.is_supported(vehicle, health_coordinator.data if health_coordinator else None)
+                else:
+                    _LOGGER.warning(f"Unsupported parameter count {param_count} for sensor {description.key}")
+                
+                if is_supported:
+                    _LOGGER.debug(f"Adding sensor {description.key} for vehicle {vin}")
+                    entities.append(
+                        MazdaSensorEntity(
+                            client=client,
+                            coordinator=coordinator,
+                            health_coordinator=health_coordinator,
+                            index=index,
+                            description=description,
+                        )
                     )
-                )
+            except Exception as ex:
+                _LOGGER.error(f"Failed to check sensor {description.key}: {ex}")
     
     # If we have any entities, add them
     if entities:
@@ -382,14 +460,44 @@ class MazdaSensorEntity(MazdaEntity, SensorEntity):
 
     entity_description: MazdaSensorEntityDescription
 
-    def __init__(self, client, coordinator, index, description):
+    def __init__(self, client, coordinator, health_coordinator, index, description):
         """Initialize Mazda sensor."""
         super().__init__(client, coordinator, index)
         self.entity_description = description
+        self.health_coordinator = health_coordinator
 
         self._attr_unique_id = f"{self.vin}_{description.key}"
 
     @property
     def native_value(self) -> StateType:
         """Return the state of the sensor."""
-        return self.entity_description.value(self.data)
+        try:
+            if self.data is None:
+                return None
+                
+            if self.entity_description.key in ["front_left_tire_pressure", "front_right_tire_pressure", "rear_left_tire_pressure", "rear_right_tire_pressure", "tpms_status"]:
+                return self.entity_description.value(self.data, self.health_coordinator.data if self.health_coordinator else None)
+            else:
+                return self.entity_description.value(self.data)
+        except Exception as e:
+            _LOGGER.debug("Error getting native value for %s: %s", self.entity_description.key, str(e))
+            return None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return the state attributes of the sensor."""
+        attrs = {}
+        
+        try:
+            # Add TPMS warning description if this is a tire pressure sensor
+            if self.entity_description.key in ["front_left_tire_pressure", "front_right_tire_pressure", "rear_left_tire_pressure", "rear_right_tire_pressure"]:
+                if self.data is None or self.health_coordinator is None or self.health_coordinator.data is None:
+                    return attrs
+                    
+                warning_level = _get_tire_warning_level(self.data, self.health_coordinator.data, self.entity_description.key)
+                if warning_level:
+                    attrs["warning_level"] = warning_level
+        except Exception as e:
+            _LOGGER.debug("Error getting extra state attributes for %s: %s", self.entity_description.key, str(e))
+            
+        return attrs

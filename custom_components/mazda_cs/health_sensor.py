@@ -43,7 +43,8 @@ from .const import (
     GENERAL_HEALTH_TEMPLATE,
     MAZDA3_HEALTH_TEMPLATE,
     CX30_HEALTH_TEMPLATE,
-    CX5_HEALTH_TEMPLATE
+    CX5_HEALTH_TEMPLATE,
+    VIN_MODEL_MAP
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -197,7 +198,8 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     _LOGGER.info("Found vehicle details: %s", vehicle_details)
                     break
             
-            # Get the appropriate template based on VIN prefix
+            # Get the appropriate template based on VIN prefix but always use API vehicle details
+            # for display and entity properties to ensure consistency
             template_key = MODEL_TEMPLATE_MAP.get(vin_prefix)
             
             # If no exact match, try partial matching for more robust detection
@@ -212,19 +214,51 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     template_key = "CX5"
                     _LOGGER.info("Using CX-5 template for VIN %s (partial match)", vin)
             
-            # Set template based on detected model
+            # Set template and vehicle model info based on detected model
+            template = GENERAL_HEALTH_TEMPLATE
+            vehicle_model_info = {}
+            
             if template_key == "MAZDA3":
                 template = MAZDA3_HEALTH_TEMPLATE
+                vehicle_model_info = VIN_MODEL_MAP.get(VIN_PREFIX_MAZDA3, {})
                 _LOGGER.info("Using Mazda 3 template for VIN %s", vin)
             elif template_key == "CX30":
                 template = CX30_HEALTH_TEMPLATE
+                vehicle_model_info = VIN_MODEL_MAP.get(VIN_PREFIX_CX30, {})
                 _LOGGER.info("Using CX-30 template for VIN %s", vin)
             elif template_key == "CX5":
                 template = CX5_HEALTH_TEMPLATE
+                vehicle_model_info = VIN_MODEL_MAP.get(VIN_PREFIX_CX5, {})
                 _LOGGER.info("Using CX-5 template for VIN %s", vin)
+                
+                # Log special handling for CX-5 TPMS
+                if vehicle_model_info.get("single_tpms_sensor", False):
+                    _LOGGER.info("CX-5 detected: Using single TPMS sensor handling")
             else:
-                template = GENERAL_HEALTH_TEMPLATE
                 _LOGGER.info("Using general template for VIN %s (no specific model template found)", vin)
+            
+            # Enhance vehicle_model_info with API data to ensure consistency
+            if vehicle_info:
+                # Override template model name with API model name for consistency
+                api_model_name = vehicle_info.get("carlineName", "")
+                api_model_year = vehicle_info.get("modelYear", "")
+                api_model_code = vehicle_info.get("modelCode", "")
+                
+                if api_model_name:
+                    vehicle_model_info["model_name"] = api_model_name
+                    _LOGGER.debug("Using API model name '%s' instead of template model name", api_model_name)
+                
+                # Add extra vehicle info from API that might be useful
+                vehicle_model_info["api_data"] = {
+                    "model_name": api_model_name,
+                    "model_year": api_model_year,
+                    "model_code": api_model_code,
+                    "nickname": vehicle_info.get("nickname", ""),
+                    "exterior_color": vehicle_info.get("exteriorColorName", ""),
+                    "interior_color": vehicle_info.get("interiorColorName", ""),
+                }
+                
+                _LOGGER.debug("Enhanced vehicle model info with API data for consistency")
             
             # Process data within remoteInfos if present (new API format)
             report_data = {}
@@ -274,7 +308,8 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     config.get("options"),
                     is_timestamp,
                     is_template_only=True,
-                    template_default=None
+                    template_default=None,
+                    vehicle_info=vehicle_model_info
                 )
                 entities.append(sensor)
                 
@@ -383,7 +418,8 @@ class MazdaHealthSensor(CoordinatorEntity, SensorEntity):
             options=None,
             force_timestamp_conversion=False,
             is_template_only=False,
-            template_default=None
+            template_default=None,
+            vehicle_info=None
         ):
         """Initialize the sensor."""
         super().__init__(coordinator)
@@ -400,6 +436,7 @@ class MazdaHealthSensor(CoordinatorEntity, SensorEntity):
         self._force_timestamp_conversion = force_timestamp_conversion
         self._is_template_only = is_template_only
         self._template_default = template_default
+        self._vehicle_info = vehicle_info
         
         # Create a unique_id based on VIN and data path
         self._unique_id = f"{DOMAIN}_{vin}_health_{data_path}"
@@ -409,6 +446,21 @@ class MazdaHealthSensor(CoordinatorEntity, SensorEntity):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._vin)},
         )
+        
+        # Add extra attributes for more detailed vehicle information display
+        if self._vehicle_info and "api_data" in self._vehicle_info:
+            api_data = self._vehicle_info["api_data"]
+            self._attr_extra_state_attributes = {
+                "vin": self._vin,
+                "model_name": api_data.get("model_name", ""),
+                "model_year": api_data.get("model_year", ""),
+                "model_code": api_data.get("model_code", ""),
+                "nickname": api_data.get("nickname", ""),
+                "exterior_color": api_data.get("exterior_color", ""),
+                "interior_color": api_data.get("interior_color", ""),
+                "data_path": self._data_path,
+                "sensor_type": "health",
+            }
         
         # Debug log for init
         _LOGGER.debug(
@@ -501,8 +553,36 @@ class MazdaHealthSensor(CoordinatorEntity, SensorEntity):
         """Process the raw value based on sensor type."""
         # Handle options-based sensors (like enums or booleans)
         if self._options and isinstance(value, (int, float)):
-            # Typically 0 is "Off" and anything else is "On" or other state
             try:
+                # Special handling for TPMS warnings in CX-5 vehicles
+                if (
+                    self._vehicle_info and 
+                    self._vehicle_info.get("single_tpms_sensor", False) and
+                    "TyrePressWarn" in self._data_path
+                ):
+                    # For CX-5 with single TPMS sensor, if one of the TPMS paths is requested
+                    # (FL, FR, RL, RR), determine the master TPMS value and use it for all
+                    tpms_paths = [
+                        "TPMSInformation.FLTyrePressWarn",
+                        "TPMSInformation.FRTyrePressWarn", 
+                        "TPMSInformation.RLTyrePressWarn", 
+                        "TPMSInformation.RRTyrePressWarn"
+                    ]
+                    
+                    # Only do this lookup once for performance
+                    if self.coordinator.data and self._vin in self.coordinator.data:
+                        report_data = self.coordinator.data[self._vin]
+                        
+                        # Try all TPMS paths to find any value
+                        for path in tpms_paths:
+                            master_value = get_value_from_path(report_data, path)
+                            if master_value is not None:
+                                # Use the first found value for all tires
+                                _LOGGER.debug(f"CX-5 single TPMS sensor: Using value {master_value} from {path} for all tires")
+                                index = min(int(master_value), len(self._options) - 1)
+                                return self._options[index]
+                
+                # Standard processing for options-based sensors
                 index = min(int(value), len(self._options) - 1)
                 return self._options[index]
             except (ValueError, TypeError, IndexError):

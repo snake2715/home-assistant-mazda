@@ -1,11 +1,14 @@
-import datetime  # noqa: D100
 import json
 import logging
 import time
 import asyncio
+import random
+import datetime
+from aiohttp.client_exceptions import ServerDisconnectedError, ClientConnectorError, ClientOSError, ClientResponseError
+from aiohttp import ClientError
 
 from .controller import Controller
-from .exceptions import MazdaConfigException
+from .exceptions import MazdaException
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,9 +46,17 @@ class Client:  # noqa: D101
         self._endpoint_delay = endpoint_interval
         self._log_api_responses = log_api_responses
         self.performance_metrics = performance_metrics
+        # Add nickname cache to reduce API calls
+        self._nickname_cache = {}
+        self._nickname_cache_expiry = {}
+        self._nickname_cache_duration = datetime.timedelta(hours=24)  # Cache nicknames for 24 hours
 
     async def validate_credentials(self):  # noqa: D102
-        await self.controller.login()
+        try:
+            await self.controller.login()
+        except (MazdaException, ClientError) as ex:
+            _LOGGER.error("Error validating credentials: %s", str(ex))
+            raise
 
     async def test_authentication(self, detailed_diagnostics=True):
         """Test authentication and return diagnostics.
@@ -82,10 +93,10 @@ class Client:  # noqa: D101
                 try:
                     vehicles = await self.get_vehicles()
                     result["details"]["vehicles_found"] = len(vehicles)
-                except Exception as ex:
+                except (MazdaException, ClientError) as ex:
                     result["details"]["vehicle_fetch_error"] = str(ex)
             
-        except Exception as ex:
+        except (MazdaException, ClientError) as ex:
             # Authentication failed
             result["success"] = False
             result["message"] = f"Authentication failed: {str(ex)}"
@@ -119,90 +130,226 @@ class Client:  # noqa: D101
             return self._cached_vehicle_list
             
         try:
-            vec_base_infos_response = await self.controller.get_vec_base_infos()
+            max_retries = 3
+            retry_count = 0
+            last_error = None
+            
+            while retry_count < max_retries:
+                try:
+                    vec_base_infos_response = await self.controller.get_vec_base_infos()
+                    break  # Success, exit the retry loop
+                except (ServerDisconnectedError, ClientConnectorError, ClientOSError) as e:
+                    retry_count += 1
+                    last_error = e
+                    if retry_count >= max_retries:
+                        _LOGGER.error("Error getting vehicle list: %s", str(e))
+                        raise
+                    
+                    # Exponential backoff with jitter
+                    wait_time = min(2 ** retry_count + (0.1 * random.random()), 30)
+                    _LOGGER.warning(
+                        "Server connection error while getting vehicle list: %s. "
+                        "Retry %d/%d in %.2f seconds", 
+                        str(e), retry_count, max_retries, wait_time
+                    )
+                    await asyncio.sleep(wait_time)
+            
+            if retry_count >= max_retries:
+                raise MazdaException(f"Failed to get vehicle list after {max_retries} attempts: {last_error}")
 
             vehicles = []
             for i, current_vec_base_info in enumerate(
-                vec_base_infos_response.get("vecBaseInfos")
+                vec_base_infos_response.get("vecBaseInfos", [])
             ):
-                current_vehicle_flags = vec_base_infos_response.get("vehicleFlags")[i]
+                try:
+                    current_vehicle_flags = vec_base_infos_response.get("vehicleFlags", [])[i]
 
-                # Ignore vehicles which are not enrolled in Mazda Connected Services
-                if current_vehicle_flags.get("vinRegistStatus") != 3:
+                    # Ignore vehicles which are not enrolled in Mazda Connected Services
+                    if current_vehicle_flags.get("vinRegistStatus") != 3:
+                        continue
+
+                    # Safely parse the vehicle information JSON
+                    vehicle_info = current_vec_base_info.get("Vehicle", {}).get("vehicleInformation", "{}")
+                    try:
+                        other_veh_info = json.loads(vehicle_info)
+                    except (json.JSONDecodeError, TypeError) as e:
+                        _LOGGER.warning("Error parsing vehicle info for index %d: %s", i, str(e))
+                        other_veh_info = {}
+
+                    # Get nickname with retry mechanism
+                    nickname = None
+                    nick_retry_count = 0
+                    max_nick_retries = 2
+                    try:
+                        while nick_retry_count < max_nick_retries:
+                            try:
+                                nickname = await self.get_nickname(
+                                    current_vec_base_info.get("vin")
+                                )
+                                break
+                            except (ServerDisconnectedError, ClientConnectorError, ClientOSError) as e:
+                                nick_retry_count += 1
+                                if nick_retry_count >= max_nick_retries:
+                                    _LOGGER.warning(
+                                        "Failed to get nickname for VIN %s: %s", 
+                                        current_vec_base_info.get("vin"), str(e)
+                                    )
+                                    nickname = ""  # Use empty string as fallback
+                                else:
+                                    await asyncio.sleep(1)  # Short delay before retry
+                    except MazdaException as ex:
+                        _LOGGER.warning("Error retrieving nickname for vehicle %s: %s", 
+                                        current_vec_base_info.get("vin", "Unknown"), str(ex))
+                        nickname = ""  # Use empty string if nickname retrieval fails completely
+
+                    # Safely access nested dictionaries with get() and provide defaults
+                    other_info = other_veh_info.get("OtherInformation", {})
+                    cv_service_info = other_veh_info.get("CVServiceInformation", {})
+                    
+                    vehicle = {
+                        "vin": current_vec_base_info.get("vin"),
+                        "id": current_vec_base_info.get("Vehicle", {})
+                        .get("CvInformation", {})
+                        .get("internalVin"),
+                        "nickname": nickname,
+                        "carlineCode": other_info.get("carlineCode"),
+                        "carlineName": other_info.get("carlineName"),
+                        "modelYear": other_info.get("modelYear"),
+                        "modelCode": other_info.get("modelCode"),
+                        "modelName": other_info.get("modelName"),
+                        "automaticTransmission": other_info.get("transmissionType") == "A",
+                        "interiorColorCode": other_info.get("interiorColorCode"),
+                        "interiorColorName": other_info.get("interiorColorName"),
+                        "exteriorColorCode": other_info.get("exteriorColorCode"),
+                        "exteriorColorName": other_info.get("exteriorColorName"),
+                        "isElectric": current_vec_base_info.get("econnectType", 0) == 1,
+                        "hasFuel": cv_service_info.get("fuelType", "00") != "05"
+                    }
+                    
+                    vehicles.append(vehicle)
+                except (MazdaException, ClientError, AttributeError, KeyError, TypeError) as ex:
+                    _LOGGER.warning("Error processing vehicle at index %d: %s", i, str(ex))
                     continue
-
-                other_veh_info = json.loads(
-                    current_vec_base_info.get("Vehicle").get("vehicleInformation")
-                )
-
-                nickname = await self.controller.get_nickname(
-                    current_vec_base_info.get("vin")
-                )
-
-                vehicle = {
-                    "vin": current_vec_base_info.get("vin"),
-                    "id": current_vec_base_info.get("Vehicle", {})
-                    .get("CvInformation", {})
-                    .get("internalVin"),
-                    "nickname": nickname,
-                    "carlineCode": other_veh_info.get("OtherInformation", {}).get(
-                        "carlineCode"
-                    ),
-                    "carlineName": other_veh_info.get("OtherInformation", {}).get(
-                        "carlineName"
-                    ),
-                    "modelYear": other_veh_info.get("OtherInformation", {}).get(
-                        "modelYear"
-                    ),
-                    "modelCode": other_veh_info.get("OtherInformation", {}).get(
-                        "modelCode"
-                    ),
-                    "modelName": other_veh_info.get("OtherInformation", {}).get(
-                        "modelName"
-                    ),
-                    "automaticTransmission": other_veh_info.get("OtherInformation", {}).get(
-                        "transmissionType"
-                    )
-                    == "A",
-                    "interiorColorCode": other_veh_info.get("OtherInformation", {}).get(
-                        "interiorColorCode"
-                    ),
-                    "interiorColorName": other_veh_info.get("OtherInformation", {}).get(
-                        "interiorColorName"
-                    ),
-                    "exteriorColorCode": other_veh_info.get("OtherInformation", {}).get(
-                        "exteriorColorCode"
-                    ),
-                    "exteriorColorName": other_veh_info.get("OtherInformation", {}).get(
-                        "exteriorColorName"
-                    ),
-                    "isElectric": current_vec_base_info.get("econnectType", 0) == 1,
-                    "hasFuel": other_veh_info.get("CVServiceInformation", {}).get("fuelType", "00") != "05"
-                }
-
-                vehicles.append(vehicle)
-                
-            # Track performance metrics if enabled
-            if start_time is not None and self.performance_metrics is not None:
-                elapsed = time.time() - start_time
-                if "get_vehicles" not in self.performance_metrics:
-                    self.performance_metrics["get_vehicles"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
-                
-                self.performance_metrics["get_vehicles"]["count"] += 1
-                self.performance_metrics["get_vehicles"]["total_time"] += elapsed
-                self.performance_metrics["get_vehicles"]["min_time"] = min(self.performance_metrics["get_vehicles"]["min_time"], elapsed)
-                self.performance_metrics["get_vehicles"]["max_time"] = max(self.performance_metrics["get_vehicles"]["max_time"], elapsed)
-                
-                _LOGGER.debug("get_vehicles call completed in %.3f seconds", elapsed)
 
             if self._use_cached_vehicle_list:
                 self._cached_vehicle_list = vehicles
                 
+            # Record performance metrics if enabled
+            if self.performance_metrics is not None and start_time is not None:
+                try:
+                    elapsed = time.time() - start_time
+                    if hasattr(self.performance_metrics, 'record_operation'):
+                        self.performance_metrics.record_operation("get_vehicles", elapsed, True)
+                    elif isinstance(self.performance_metrics, dict):
+                        if "get_vehicles" not in self.performance_metrics:
+                            self.performance_metrics["get_vehicles"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
+                        
+                        self.performance_metrics["get_vehicles"]["count"] += 1
+                        self.performance_metrics["get_vehicles"]["total_time"] += elapsed
+                        self.performance_metrics["get_vehicles"]["min_time"] = min(self.performance_metrics["get_vehicles"]["min_time"], elapsed)
+                        self.performance_metrics["get_vehicles"]["max_time"] = max(self.performance_metrics["get_vehicles"]["max_time"], elapsed)
+                    else:
+                        _LOGGER.debug("Performance metrics enabled but object doesn't support expected interfaces")
+                    
+                    _LOGGER.debug("get_vehicles call completed in %.3f seconds", elapsed)
+                except (AttributeError, TypeError) as e:
+                    _LOGGER.warning("Error recording performance metrics: %s", str(e))
+                
+            # Add delay between endpoint calls if configured
+            if self._endpoint_delay > 0:
+                _LOGGER.debug("Sleeping for %d seconds between API endpoint calls", self._endpoint_delay)
+                await asyncio.sleep(self._endpoint_delay)
+                
             return vehicles
             
-        except Exception as ex:
+        except (MazdaException, ClientError) as ex:
+            # Record performance metrics if enabled
+            if self.performance_metrics is not None and start_time is not None:
+                try:
+                    elapsed = time.time() - start_time
+                    if hasattr(self.performance_metrics, 'record_operation'):
+                        self.performance_metrics.record_operation("get_vehicles", elapsed, False)
+                    elif isinstance(self.performance_metrics, dict):
+                        if "get_vehicles" not in self.performance_metrics:
+                            self.performance_metrics["get_vehicles"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
+                        
+                        self.performance_metrics["get_vehicles"]["count"] += 1
+                        self.performance_metrics["get_vehicles"]["total_time"] += elapsed
+                        self.performance_metrics["get_vehicles"]["min_time"] = min(self.performance_metrics["get_vehicles"]["min_time"], elapsed)
+                        self.performance_metrics["get_vehicles"]["max_time"] = max(self.performance_metrics["get_vehicles"]["max_time"], elapsed)
+                    else:
+                        _LOGGER.debug("Performance metrics enabled but object doesn't support expected interfaces")
+                    
+                    _LOGGER.debug("get_vehicles call completed in %.3f seconds", elapsed)
+                except (AttributeError, TypeError) as e:
+                    _LOGGER.warning("Error recording performance metrics: %s", str(e))
+                
             _LOGGER.error("Error getting vehicle list: %s", str(ex))
             raise
+
+    async def get_nickname(self, vehicle_id):
+        """Gets the nickname for the specified vehicle."""
+        
+        # Check cache first to avoid frequent API calls
+        if vehicle_id in self._nickname_cache:
+            # If the cache hasn't expired, return the cached value
+            if self._nickname_cache_expiry.get(vehicle_id, datetime.datetime.min) > datetime.datetime.now():
+                _LOGGER.debug(f"Using cached nickname for vehicle {vehicle_id}: {self._nickname_cache[vehicle_id]}")
+                return self._nickname_cache[vehicle_id]
+        
+        start_time = time.time()
+        try:
+            nickname = await self.controller.get_nickname(vehicle_id)
+            
+            # Store in cache with expiry time
+            self._nickname_cache[vehicle_id] = nickname
+            self._nickname_cache_expiry[vehicle_id] = datetime.datetime.now() + self._nickname_cache_duration
+            
+            # Record performance metrics if enabled
+            if self.performance_metrics is not None:
+                try:
+                    elapsed = time.time() - start_time
+                    if hasattr(self.performance_metrics, 'record_operation'):
+                        self.performance_metrics.record_operation("get_nickname", elapsed, True)
+                    elif isinstance(self.performance_metrics, dict):
+                        if "get_nickname" not in self.performance_metrics:
+                            self.performance_metrics["get_nickname"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
+                        
+                        self.performance_metrics["get_nickname"]["count"] += 1
+                        self.performance_metrics["get_nickname"]["total_time"] += elapsed
+                        self.performance_metrics["get_nickname"]["min_time"] = min(self.performance_metrics["get_nickname"]["min_time"], elapsed)
+                        self.performance_metrics["get_nickname"]["max_time"] = max(self.performance_metrics["get_nickname"]["max_time"], elapsed)
+                    else:
+                        _LOGGER.debug("Performance metrics enabled but object doesn't support expected interfaces")
+                    
+                    _LOGGER.debug("get_nickname call completed in %.3f seconds", elapsed)
+                except (AttributeError, TypeError) as e:
+                    _LOGGER.warning("Error recording performance metrics: %s", str(e))
+                
+            return nickname
+        except (MazdaException, ClientError, AttributeError, TypeError) as ex:
+            # Record performance metrics if enabled
+            if self.performance_metrics is not None:
+                try:
+                    elapsed = time.time() - start_time
+                    if hasattr(self.performance_metrics, 'record_operation'):
+                        self.performance_metrics.record_operation("get_nickname", elapsed, False)
+                    elif isinstance(self.performance_metrics, dict):
+                        if "get_nickname" not in self.performance_metrics:
+                            self.performance_metrics["get_nickname"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
+                        
+                        self.performance_metrics["get_nickname"]["count"] += 1
+                        self.performance_metrics["get_nickname"]["total_time"] += elapsed
+                        self.performance_metrics["get_nickname"]["min_time"] = min(self.performance_metrics["get_nickname"]["min_time"], elapsed)
+                        self.performance_metrics["get_nickname"]["max_time"] = max(self.performance_metrics["get_nickname"]["max_time"], elapsed)
+                    else:
+                        _LOGGER.debug("Performance metrics enabled but object doesn't support expected interfaces")
+                    
+                    _LOGGER.debug("get_nickname call completed in %.3f seconds", elapsed)
+                except (AttributeError, TypeError) as e:
+                    _LOGGER.warning("Error recording performance metrics: %s", str(e))
+                
+            raise ex
 
     async def get_vehicle_status(self, vehicle_id):  # noqa: D102
         """Get the current status of a specific vehicle.
@@ -311,16 +458,26 @@ class Client:  # noqa: D101
             
             # Track performance metrics if enabled
             if start_time is not None and self.performance_metrics is not None:
-                elapsed = time.time() - start_time
-                if "get_vehicle_status" not in self.performance_metrics:
-                    self.performance_metrics["get_vehicle_status"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
-                
-                self.performance_metrics["get_vehicle_status"]["count"] += 1
-                self.performance_metrics["get_vehicle_status"]["total_time"] += elapsed
-                self.performance_metrics["get_vehicle_status"]["min_time"] = min(self.performance_metrics["get_vehicle_status"]["min_time"], elapsed)
-                self.performance_metrics["get_vehicle_status"]["max_time"] = max(self.performance_metrics["get_vehicle_status"]["max_time"], elapsed)
-                
-                _LOGGER.debug("get_vehicle_status call completed in %.3f seconds", elapsed)
+                try:
+                    elapsed = time.time() - start_time
+                    if hasattr(self.performance_metrics, 'record_operation'):
+                        # Use record_operation method if it exists
+                        self.performance_metrics.record_operation("get_vehicle_status", elapsed, True)
+                    elif isinstance(self.performance_metrics, dict):
+                        # Fall back to dict-based metrics tracking
+                        if "get_vehicle_status" not in self.performance_metrics:
+                            self.performance_metrics["get_vehicle_status"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
+                        
+                        self.performance_metrics["get_vehicle_status"]["count"] += 1
+                        self.performance_metrics["get_vehicle_status"]["total_time"] += elapsed
+                        self.performance_metrics["get_vehicle_status"]["min_time"] = min(self.performance_metrics["get_vehicle_status"]["min_time"], elapsed)
+                        self.performance_metrics["get_vehicle_status"]["max_time"] = max(self.performance_metrics["get_vehicle_status"]["max_time"], elapsed)
+                    else:
+                        _LOGGER.debug("Performance metrics enabled but object doesn't support expected interfaces")
+                    
+                    _LOGGER.debug("get_vehicle_status call completed in %.3f seconds", elapsed)
+                except (AttributeError, TypeError) as e:
+                    _LOGGER.warning("Error recording performance metrics: %s", str(e))
                 
             # Add delay between endpoint calls if configured
             if self._endpoint_delay > 0:
@@ -329,7 +486,7 @@ class Client:  # noqa: D101
                 
             return vehicle_status
             
-        except Exception as ex:
+        except (MazdaException, ClientError) as ex:
             _LOGGER.error("Error getting vehicle status for %s: %s", vehicle_id, str(ex))
             raise
 
@@ -349,16 +506,26 @@ class Client:  # noqa: D101
             
             # Track performance metrics if enabled
             if start_time is not None and self.performance_metrics is not None:
-                elapsed = time.time() - start_time
-                if "get_health_reports" not in self.performance_metrics:
-                    self.performance_metrics["get_health_reports"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
-                
-                self.performance_metrics["get_health_reports"]["count"] += 1
-                self.performance_metrics["get_health_reports"]["total_time"] += elapsed
-                self.performance_metrics["get_health_reports"]["min_time"] = min(self.performance_metrics["get_health_reports"]["min_time"], elapsed)
-                self.performance_metrics["get_health_reports"]["max_time"] = max(self.performance_metrics["get_health_reports"]["max_time"], elapsed)
-                
-                _LOGGER.debug("get_health_reports call completed in %.3f seconds", elapsed)
+                try:
+                    elapsed = time.time() - start_time
+                    if hasattr(self.performance_metrics, 'record_operation'):
+                        # Use record_operation method if it exists
+                        self.performance_metrics.record_operation("get_health_reports", elapsed, True)
+                    elif isinstance(self.performance_metrics, dict):
+                        # Fall back to dict-based metrics tracking
+                        if "get_health_reports" not in self.performance_metrics:
+                            self.performance_metrics["get_health_reports"] = {"count": 0, "total_time": 0, "min_time": float('inf'), "max_time": 0}
+                        
+                        self.performance_metrics["get_health_reports"]["count"] += 1
+                        self.performance_metrics["get_health_reports"]["total_time"] += elapsed
+                        self.performance_metrics["get_health_reports"]["min_time"] = min(self.performance_metrics["get_health_reports"]["min_time"], elapsed)
+                        self.performance_metrics["get_health_reports"]["max_time"] = max(self.performance_metrics["get_health_reports"]["max_time"], elapsed)
+                    else:
+                        _LOGGER.debug("Performance metrics enabled but object doesn't support expected interfaces")
+                    
+                    _LOGGER.debug("get_health_reports call completed in %.3f seconds", elapsed)
+                except (AttributeError, TypeError) as e:
+                    _LOGGER.warning("Error recording performance metrics: %s", str(e))
                 
             # Add delay between endpoint calls if configured
             if self._endpoint_delay > 0:
@@ -367,7 +534,7 @@ class Client:  # noqa: D101
                 
             return response
             
-        except Exception as ex:
+        except (MazdaException, ClientError) as ex:
             _LOGGER.error("Error getting health reports for %s: %s", vehicle_id, str(ex))
             raise
 
@@ -421,7 +588,7 @@ class Client:  # noqa: D101
         try:
             report = await self.controller.get_health_report(vehicle_id)
             return report
-        except Exception as ex:
+        except (MazdaException, ClientError) as ex:
             _LOGGER.error("Error retrieving health report for vehicle %s: %s", vehicle_id, ex)
             return None
 

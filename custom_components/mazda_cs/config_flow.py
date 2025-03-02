@@ -11,7 +11,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_REGION
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import aiohttp_client
 
-from . import MazdaAccountLockedException, MazdaAPI, MazdaAuthenticationException
+from . import MazdaAccountLockedException, MazdaAPI, MazdaAuthenticationException, MazdaException
 from .const import (
     DOMAIN,
     MAZDA_REGIONS,
@@ -26,6 +26,12 @@ from .const import (
     CONF_ENABLE_METRICS,
     CONF_TESTING_MODE,
     CONF_DISCOVERY_MODE,
+    CONF_MAX_RETRIES,
+    CONF_RETRY_DELAY,
+    CONF_MAX_RETRY_BACKOFF,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_DELAY,
+    DEFAULT_MAX_RETRY_BACKOFF,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,6 +95,33 @@ DATA_SCHEMA = vol.Schema(
                 "description": "Maximum wait time for health report API calls (30-180 seconds)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=30, max=180)),
+        vol.Optional(
+            CONF_MAX_RETRIES,
+            default=DEFAULT_MAX_RETRIES,
+            description={
+                "suggested_value": DEFAULT_MAX_RETRIES,
+                "name": "Maximum Retry Attempts",
+                "description": "Number of times to retry failed API requests (1-10)"
+            },
+        ): vol.All(vol.Coerce(int), vol.Range(min=1, max=10)),
+        vol.Optional(
+            CONF_RETRY_DELAY,
+            default=DEFAULT_RETRY_DELAY,
+            description={
+                "suggested_value": DEFAULT_RETRY_DELAY,
+                "name": "Initial Retry Delay (seconds)",
+                "description": "Initial delay between retry attempts (0.5-5 seconds)"
+            },
+        ): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=5.0)),
+        vol.Optional(
+            CONF_MAX_RETRY_BACKOFF,
+            default=DEFAULT_MAX_RETRY_BACKOFF,
+            description={
+                "suggested_value": DEFAULT_MAX_RETRY_BACKOFF,
+                "name": "Maximum Retry Backoff (seconds)",
+                "description": "Maximum delay between retries with backoff (5-120 seconds)"
+            },
+        ): vol.All(vol.Coerce(float), vol.Range(min=5.0, max=120.0)),
     }
 )
 
@@ -148,6 +181,33 @@ OPTIONS_SCHEMA = vol.Schema(
                 "description": "Maximum wait time for health report API calls (30-180 seconds)"
             },
         ): vol.All(vol.Coerce(int), vol.Range(min=30, max=180)),
+        vol.Optional(
+            CONF_MAX_RETRIES,
+            default=DEFAULT_MAX_RETRIES,
+            description={
+                "suggested_value": DEFAULT_MAX_RETRIES,
+                "name": "Maximum Retry Attempts",
+                "description": "Number of times to retry failed API requests (1-10)"
+            },
+        ): vol.All(vol.Coerce(int), vol.Range(min=1, max=10)),
+        vol.Optional(
+            CONF_RETRY_DELAY,
+            default=DEFAULT_RETRY_DELAY,
+            description={
+                "suggested_value": DEFAULT_RETRY_DELAY,
+                "name": "Initial Retry Delay (seconds)",
+                "description": "Initial delay between retry attempts (0.5-5 seconds)"
+            },
+        ): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=5.0)),
+        vol.Optional(
+            CONF_MAX_RETRY_BACKOFF,
+            default=DEFAULT_MAX_RETRY_BACKOFF,
+            description={
+                "suggested_value": DEFAULT_MAX_RETRY_BACKOFF,
+                "name": "Maximum Retry Backoff (seconds)",
+                "description": "Maximum delay between retries with backoff (5-120 seconds)"
+            },
+        ): vol.All(vol.Coerce(float), vol.Range(min=5.0, max=120.0)),
         vol.Optional(
             CONF_DEBUG_MODE,
             default=False,
@@ -235,7 +295,7 @@ class MazdaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "account_locked"
             except aiohttp.ClientError:
                 errors["base"] = "cannot_connect"
-            except Exception as ex:  # pylint: disable=broad-except
+            except (MazdaException, KeyError, ValueError, asyncio.TimeoutError, OSError) as ex:
                 errors["base"] = "unknown"
                 _LOGGER.exception(
                     "Unknown error occurred during Mazda login request: %s", ex
@@ -317,6 +377,33 @@ class MazdaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             "description": "Maximum wait time for health report API calls (30-180 seconds)"
                         },
                     ): vol.All(vol.Coerce(int), vol.Range(min=30, max=180)),
+                    vol.Optional(
+                        CONF_MAX_RETRIES,
+                        default=DEFAULT_MAX_RETRIES,
+                        description={
+                            "suggested_value": DEFAULT_MAX_RETRIES,
+                            "name": "Maximum Retry Attempts",
+                            "description": "Number of times to retry failed API requests (1-10)"
+                        },
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=10)),
+                    vol.Optional(
+                        CONF_RETRY_DELAY,
+                        default=DEFAULT_RETRY_DELAY,
+                        description={
+                            "suggested_value": DEFAULT_RETRY_DELAY,
+                            "name": "Initial Retry Delay (seconds)",
+                            "description": "Initial delay between retry attempts (0.5-5 seconds)"
+                        },
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=5.0)),
+                    vol.Optional(
+                        CONF_MAX_RETRY_BACKOFF,
+                        default=DEFAULT_MAX_RETRY_BACKOFF,
+                        description={
+                            "suggested_value": DEFAULT_MAX_RETRY_BACKOFF,
+                            "name": "Maximum Retry Backoff (seconds)",
+                            "description": "Maximum delay between retries with backoff (5-120 seconds)"
+                        },
+                    ): vol.All(vol.Coerce(float), vol.Range(min=5.0, max=120.0)),
                 }
             ),
             errors=errors,
@@ -400,6 +487,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             CONF_TESTING_MODE: current_config.get(CONF_TESTING_MODE, False),
             CONF_ENABLE_METRICS: current_config.get(CONF_ENABLE_METRICS, False),
             CONF_DISCOVERY_MODE: current_config.get(CONF_DISCOVERY_MODE, False),
+            CONF_MAX_RETRIES: current_config.get(CONF_MAX_RETRIES, DEFAULT_MAX_RETRIES),
+            CONF_RETRY_DELAY: current_config.get(CONF_RETRY_DELAY, DEFAULT_RETRY_DELAY),
+            CONF_MAX_RETRY_BACKOFF: current_config.get(CONF_MAX_RETRY_BACKOFF, DEFAULT_MAX_RETRY_BACKOFF),
         }
 
         return self.async_show_form(

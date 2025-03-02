@@ -7,6 +7,39 @@
 # 2 = Low Pressure - Tire pressure significantly below recommended value
 # 3 = Critical - Dangerous tire pressure condition or possible TPMS sensor issue
 # 4 = System Error - TPMS system malfunction or communication error
+# 
+# Vehicle-specific TPMS behavior:
+# - CX-5 models: Uses a single TPMS sensor for all four tires, so all tires will show identical warnings
+# - Other models: May have individual sensors per tire showing different warning states
+
+# TPMS Warning Level Constants
+TPMS_WARNING_NORMAL = 0
+TPMS_WARNING_WARNING = 1
+TPMS_WARNING_LOW_PRESSURE = 2
+TPMS_WARNING_CRITICAL = 3
+TPMS_WARNING_SYSTEM_ERROR = 4
+
+# TPMS Warning Descriptions
+TPMS_WARNING_DESCRIPTIONS = {
+    TPMS_WARNING_NORMAL: "Normal",
+    TPMS_WARNING_WARNING: "Warning",
+    TPMS_WARNING_LOW_PRESSURE: "Low Pressure",
+    TPMS_WARNING_CRITICAL: "Critical",
+    TPMS_WARNING_SYSTEM_ERROR: "System Error",
+}
+
+# Engine Status Definitions
+# PowerControlStatus values:
+# 0 = Off - Vehicle is completely off
+# 1 = On - Vehicle electronics are on but engine is not running
+# 2 = Engine Running - Engine is currently running
+#
+# EngineState values:
+# 0 = Initial State - System starting up
+# 1 = Engine Off - Engine is off
+# 2 = Engine Starting - Engine is in the process of starting
+# 3 = Engine Running - Engine is running
+# 4 = Engine Stopping - Engine is in the process of stopping
 
 DOMAIN = "mazda_cs"
 
@@ -29,6 +62,11 @@ CONF_ENABLE_METRICS = "enable_metrics"
 CONF_DISCOVERY_MODE = "discovery_mode"  # New flag for sensor discovery
 CONF_HEALTH_TIMEOUT = "health_timeout"  # Timeout for health report API calls
 
+# Advanced retry mechanism options
+CONF_MAX_RETRIES = "max_retries"  # Maximum number of retry attempts
+CONF_RETRY_DELAY = "retry_delay"  # Initial delay between retries in seconds
+CONF_MAX_RETRY_BACKOFF = "max_retry_backoff"  # Maximum backoff delay in seconds
+
 # Default values (in seconds)
 DEFAULT_REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
 DEFAULT_VEHICLE_INTERVAL = 2
@@ -36,6 +74,11 @@ DEFAULT_ENDPOINT_INTERVAL = 1
 DEFAULT_HEALTH_REPORT_INTERVAL = 60  # 60 minutes (stored as minutes)
 DEFAULT_HEALTH_VEHICLE_INTERVAL = 30
 DEFAULT_HEALTH_TIMEOUT = 45  # Default timeout for health report API calls in seconds
+
+# Default retry mechanism values
+DEFAULT_MAX_RETRIES = 3  # Number of retry attempts
+DEFAULT_RETRY_DELAY = 1.0  # Initial delay (1 second)
+DEFAULT_MAX_RETRY_BACKOFF = 30.0  # Maximum backoff (30 seconds)
 
 # Data storage keys
 DATA_CLIENT = "mazda_client"
@@ -561,5 +604,6 @@ VIN_MODEL_MAP = {
         "template": CX5_HEALTH_TEMPLATE,
         "model_name": "CX-5",
         "vehicle_type": "SUV",
+        "single_tpms_sensor": True,  # CX-5 has a single TPMS sensor for all tires
     }
 }

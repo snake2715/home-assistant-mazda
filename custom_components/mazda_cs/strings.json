@@ -111,6 +111,9 @@
       },
       "rear_right_window": {
         "name": "Rear Right Window"
+      },
+      "engine_running": {
+        "name": "Engine Running"
       }
     },
     "button": {
@@ -186,7 +189,7 @@
         "name": "Remaining range"
       },
       "ev_remaining_range_bev": {
-        "name": "Remaining range BEV"
+        "name": "EV Range (electric only)"
       },
       "ev_charge_level": {
         "name": "EV Charge Level"
@@ -223,6 +226,9 @@
       },
       "rear_right_tire_pressure": {
         "name": "Rear Right Tire Pressure"
+      },
+      "engine_state": {
+        "name": "Engine State"
       }
     },
     "switch": {
