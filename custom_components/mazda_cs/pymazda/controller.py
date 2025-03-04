@@ -2,6 +2,7 @@ import hashlib  # noqa: D100
 
 from .connection import Connection
 from .exceptions import MazdaException
+from ..priority_lock import RequestPriority
 import logging
 
 _LOGGER = logging.getLogger(__name__)
@@ -11,15 +12,15 @@ class Controller:  # noqa: D101
         self.connection = Connection(email, password, region, websession)
         self.log_api_responses = log_api_responses
 
-    async def login(self):  # noqa: D102
-        await self.connection.login()
+    async def login(self, priority=RequestPriority.HEALTH_REPORT):  # noqa: D102
+        await self.connection.login(priority=priority)
 
-    async def get_tac(self):  # noqa: D102
+    async def get_tac(self, priority=RequestPriority.HEALTH_REPORT):  # noqa: D102
         return await self.connection.api_request(
-            "GET", "content/getTac/v4", needs_keys=True, needs_auth=False
+            "GET", "content/getTac/v4", needs_keys=True, needs_auth=False, priority=priority
         )
 
-    async def get_language_pkg(self):  # noqa: D102
+    async def get_language_pkg(self, priority=RequestPriority.HEALTH_REPORT):  # noqa: D102
         postBody = {"platformType": "ANDROID", "region": "MNAO", "version": "2.0.4"}
         return await self.connection.api_request(
             "POST",
@@ -27,18 +28,20 @@ class Controller:  # noqa: D101
             body_dict=postBody,
             needs_keys=True,
             needs_auth=False,
+            priority=priority,
         )
 
-    async def get_vec_base_infos(self):  # noqa: D102
+    async def get_vec_base_infos(self, priority=RequestPriority.VEHICLE_STATUS):  # noqa: D102
         return await self.connection.api_request(
             "POST",
             "remoteServices/getVecBaseInfos/v4",
             body_dict={"internaluserid": "__INTERNAL_ID__"},
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
-    async def get_vehicle_status(self, internal_vin):  # noqa: D102
+    async def get_vehicle_status(self, internal_vin, priority=RequestPriority.VEHICLE_STATUS):  # noqa: D102
         post_body = {
             "internaluserid": "__INTERNAL_ID__",
             "internalvin": internal_vin,
@@ -52,6 +55,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -59,7 +63,7 @@ class Controller:  # noqa: D101
 
         return response
 
-    async def get_ev_vehicle_status(self, internal_vin):  # noqa: D102
+    async def get_ev_vehicle_status(self, internal_vin, priority=RequestPriority.VEHICLE_STATUS):  # noqa: D102
         post_body = {
             "internaluserid": "__INTERNAL_ID__",
             "internalvin": internal_vin,
@@ -73,6 +77,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -80,7 +85,7 @@ class Controller:  # noqa: D101
 
         return response
 
-    async def get_health_report(self, internal_vin):  # noqa: D102
+    async def get_health_report(self, internal_vin, priority=RequestPriority.HEALTH_REPORT):  # noqa: D102
         post_body = {
             "internaluserid": "__INTERNAL_ID__",
             "internalvin": internal_vin,
@@ -96,6 +101,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -121,7 +127,7 @@ class Controller:  # noqa: D101
 
         return response
 
-    async def door_unlock(self, internal_vin):  # noqa: D102
+    async def door_unlock(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -130,6 +136,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -141,7 +148,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def door_lock(self, internal_vin):  # noqa: D102
+    async def door_lock(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -150,6 +157,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -161,7 +169,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def get_command_status(self, internal_vin, visit_no):  # noqa: D102
+    async def get_command_status(self, internal_vin, visit_no, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         """Get the status of a remote command using the visitNo.
         
         Args:
@@ -183,6 +191,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if self.log_api_responses:
@@ -190,7 +199,7 @@ class Controller:  # noqa: D101
 
         return response
 
-    async def light_on(self, internal_vin):  # noqa: D102
+    async def light_on(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -199,6 +208,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -210,7 +220,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def light_off(self, internal_vin):  # noqa: D102
+    async def light_off(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -219,6 +229,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -230,7 +241,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def engine_start(self, internal_vin):  # noqa: D102
+    async def engine_start(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -239,6 +250,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -250,7 +262,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def engine_stop(self, internal_vin):  # noqa: D102
+    async def engine_stop(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -259,6 +271,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -270,7 +283,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def get_nickname(self, vin):  # noqa: D102
+    async def get_nickname(self, vin, priority=RequestPriority.HEALTH_REPORT):  # noqa: D102
         if len(vin) != 17:
             raise MazdaException("Invalid VIN")
 
@@ -282,6 +295,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -294,7 +308,7 @@ class Controller:  # noqa: D101
         return nickname  # This now prioritizes nickname > vtitle > carlineDesc
 
 
-    async def update_nickname(self, vin, new_nickname):  # noqa: D102
+    async def update_nickname(self, vin, new_nickname, priority=RequestPriority.HEALTH_REPORT):  # noqa: D102
         if len(vin) != 17:
             raise MazdaException("Invalid VIN")
         if len(new_nickname) > 20:
@@ -312,6 +326,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -319,7 +334,7 @@ class Controller:  # noqa: D101
 
         _LOGGER.debug(f"Successfully updated nickname for VIN {vin} to {new_nickname}")
 
-    async def send_poi(self, internal_vin, latitude, longitude, name):  # noqa: D102
+    async def send_poi(self, internal_vin, latitude, longitude, name, priority=RequestPriority.HEALTH_REPORT):  # noqa: D102
         # Calculate a POI ID that is unique to the name and location
         poi_id = hashlib.sha256(
             (str(name) + str(latitude) + str(longitude)).encode()
@@ -349,6 +364,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -360,7 +376,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def charge_start(self, internal_vin):  # noqa: D102
+    async def charge_start(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -369,6 +385,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -380,7 +397,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def charge_stop(self, internal_vin):  # noqa: D102
+    async def charge_stop(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -389,6 +406,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -400,7 +418,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def get_hvac_setting(self, internal_vin):  # noqa: D102
+    async def get_hvac_setting(self, internal_vin, priority=RequestPriority.VEHICLE_STATUS):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -409,6 +427,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -423,6 +442,7 @@ class Controller:  # noqa: D101
         temperature_unit,
         front_defroster,
         rear_defroster,
+        priority=RequestPriority.USER_COMMAND,
     ):
         post_body = {
             "internaluserid": "__INTERNAL_ID__",
@@ -441,6 +461,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -452,7 +473,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def hvac_on(self, internal_vin):  # noqa: D102
+    async def hvac_on(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -461,6 +482,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -472,7 +494,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def hvac_off(self, internal_vin):  # noqa: D102
+    async def hvac_off(self, internal_vin, priority=RequestPriority.USER_COMMAND):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -481,6 +503,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
@@ -492,7 +515,7 @@ class Controller:  # noqa: D101
         
         return response
 
-    async def refresh_vehicle_status(self, internal_vin):  # noqa: D102
+    async def refresh_vehicle_status(self, internal_vin, priority=RequestPriority.VEHICLE_STATUS):  # noqa: D102
         post_body = {"internaluserid": "__INTERNAL_ID__", "internalvin": internal_vin}
 
         response = await self.connection.api_request(
@@ -501,6 +524,7 @@ class Controller:  # noqa: D101
             body_dict=post_body,
             needs_keys=True,
             needs_auth=True,
+            priority=priority,
         )
 
         if response["resultCode"] != "200S00":
