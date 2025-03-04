@@ -9,7 +9,7 @@ from aiohttp import ClientError
 
 from .controller import Controller
 from .exceptions import MazdaException
-
+from ..priority_lock import RequestPriority
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class Client:  # noqa: D101
 
     async def validate_credentials(self):  # noqa: D102
         try:
-            await self.controller.login()
+            await self.controller.login(RequestPriority.USER_COMMAND)
         except (MazdaException, ClientError) as ex:
             _LOGGER.error("Error validating credentials: %s", str(ex))
             raise
@@ -78,7 +78,7 @@ class Client:  # noqa: D101
         
         try:
             # Try login with expanded error handling
-            await self.controller.login()
+            await self.controller.login(RequestPriority.USER_COMMAND)
             
             # If we got here, login was successful
             result["success"] = True
@@ -136,7 +136,7 @@ class Client:  # noqa: D101
             
             while retry_count < max_retries:
                 try:
-                    vec_base_infos_response = await self.controller.get_vec_base_infos()
+                    vec_base_infos_response = await self.controller.get_vec_base_infos(RequestPriority.VEHICLE_STATUS)
                     break  # Success, exit the retry loop
                 except (ServerDisconnectedError, ClientConnectorError, ClientOSError) as e:
                     retry_count += 1
@@ -299,8 +299,8 @@ class Client:  # noqa: D101
         
         start_time = time.time()
         try:
-            nickname = await self.controller.get_nickname(vehicle_id)
-            
+            nickname = await self.controller.get_nickname(vehicle_id, RequestPriority.HEALTH_REPORT)
+
             # Store in cache with expiry time
             self._nickname_cache[vehicle_id] = nickname
             self._nickname_cache_expiry[vehicle_id] = datetime.datetime.now() + self._nickname_cache_duration
@@ -363,7 +363,7 @@ class Client:  # noqa: D101
         start_time = time.time() if self.performance_metrics is not None else None
         
         try:
-            response = await self.controller.get_vehicle_status(vehicle_id)
+            response = await self.controller.get_vehicle_status(vehicle_id, RequestPriority.VEHICLE_STATUS)
 
             if response is None or "alertInfos" not in response or not response["alertInfos"]:
                 _LOGGER.error(f"Invalid response received for VIN {vehicle_id}: {response}")
@@ -502,7 +502,7 @@ class Client:  # noqa: D101
         start_time = time.time() if self.performance_metrics is not None else None
         
         try:
-            response = await self.controller.get_health_reports(vehicle_id)
+            response = await self.controller.get_health_reports(vehicle_id, RequestPriority.HEALTH_REPORT)
             
             # Track performance metrics if enabled
             if start_time is not None and self.performance_metrics is not None:
@@ -540,7 +540,7 @@ class Client:  # noqa: D101
 
     async def get_ev_vehicle_status(self, vehicle_id):  # noqa: D102
         ev_vehicle_status_response = await self.controller.get_ev_vehicle_status(
-            vehicle_id
+            vehicle_id, RequestPriority.VEHICLE_STATUS
         )
 
         result_data = ev_vehicle_status_response.get("resultData")[0]
@@ -586,7 +586,7 @@ class Client:  # noqa: D101
         This may include different sensors for different vehicle models.
         """
         try:
-            report = await self.controller.get_health_report(vehicle_id)
+            report = await self.controller.get_health_report(vehicle_id, RequestPriority.HEALTH_REPORT)
             return report
         except (MazdaException, ClientError) as ex:
             _LOGGER.error("Error retrieving health report for vehicle %s: %s", vehicle_id, ex)
@@ -608,38 +608,38 @@ class Client:  # noqa: D101
         )
 
     async def turn_on_hazard_lights(self, vehicle_id):  # noqa: D102
-        await self.controller.light_on(vehicle_id)
+        await self.controller.light_on(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def turn_off_hazard_lights(self, vehicle_id):  # noqa: D102
-        await self.controller.light_off(vehicle_id)
+        await self.controller.light_off(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def unlock_doors(self, vehicle_id):  # noqa: D102
         self.__save_assumed_value(vehicle_id, "lock_state", False)
 
-        await self.controller.door_unlock(vehicle_id)
+        await self.controller.door_unlock(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def lock_doors(self, vehicle_id):  # noqa: D102
         self.__save_assumed_value(vehicle_id, "lock_state", True)
 
-        await self.controller.door_lock(vehicle_id)
+        await self.controller.door_lock(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def start_engine(self, vehicle_id):  # noqa: D102
-        await self.controller.engine_start(vehicle_id)
+        await self.controller.engine_start(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def stop_engine(self, vehicle_id):  # noqa: D102
-        await self.controller.engine_stop(vehicle_id)
+        await self.controller.engine_stop(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def send_poi(self, vehicle_id, latitude, longitude, name):  # noqa: D102
-        await self.controller.send_poi(vehicle_id, latitude, longitude, name)
+        await self.controller.send_poi(vehicle_id, latitude, longitude, name, RequestPriority.HEALTH_REPORT)
 
     async def start_charging(self, vehicle_id):  # noqa: D102
-        await self.controller.charge_start(vehicle_id)
+        await self.controller.charge_start(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def stop_charging(self, vehicle_id):  # noqa: D102
-        await self.controller.charge_stop(vehicle_id)
+        await self.controller.charge_stop(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def get_hvac_setting(self, vehicle_id):  # noqa: D102
-        response = await self.controller.get_hvac_setting(vehicle_id)
+        response = await self.controller.get_hvac_setting(vehicle_id, RequestPriority.HEALTH_REPORT)
 
         response_hvac_settings = response.get("hvacSettings", {})
 
@@ -671,24 +671,24 @@ class Client:  # noqa: D101
         )
 
         await self.controller.set_hvac_setting(
-            vehicle_id, temperature, temperature_unit, front_defroster, rear_defroster
+            vehicle_id, temperature, temperature_unit, front_defroster, rear_defroster, RequestPriority.USER_COMMAND
         )
 
     async def turn_on_hvac(self, vehicle_id):  # noqa: D102
         self.__save_assumed_value(vehicle_id, "hvac_mode", True)
 
-        await self.controller.hvac_on(vehicle_id)
+        await self.controller.hvac_on(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def turn_off_hvac(self, vehicle_id):  # noqa: D102
         self.__save_assumed_value(vehicle_id, "hvac_mode", False)
 
-        await self.controller.hvac_off(vehicle_id)
+        await self.controller.hvac_off(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def refresh_vehicle_status(self, vehicle_id):  # noqa: D102
-        await self.controller.refresh_vehicle_status(vehicle_id)
+        await self.controller.refresh_vehicle_status(vehicle_id, RequestPriority.USER_COMMAND)
 
     async def update_vehicle_nickname(self, vin, new_nickname):  # noqa: D102
-        await self.controller.update_nickname(vin, new_nickname)
+        await self.controller.update_nickname(vin, new_nickname, RequestPriority.HEALTH_REPORT)
 
     async def close(self):  # noqa: D102
         await self.controller.close()
