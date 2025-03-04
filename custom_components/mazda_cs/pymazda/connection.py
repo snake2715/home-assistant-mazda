@@ -30,6 +30,7 @@ from .exceptions import (
 )
 from .sensordata.sensor_data_builder import SensorDataBuilder
 from .ssl_context_configurator.ssl_context_configurator import SSLContextConfigurator
+from ..priority_lock import priority_lock, RequestPriority
 
 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ssl_context.load_default_certs()
@@ -160,8 +161,12 @@ class Connection:
         self.access_token = None
         self.access_token_expiration_ts = None
         # Try to log in again
-        await self.login()
-        self.logger.info("Session recovery complete")
+        try:
+            await self.login(priority=RequestPriority.USER_COMMAND)
+            self.logger.info("Session recovery complete")
+        except Exception as e:
+            self.logger.error("Session recovery failed: %s", str(e))
+            raise
 
     def __get_timestamp_str_ms(self):
         return str(int(round(time.time() * 1000)))
@@ -253,9 +258,10 @@ class Connection:
         body_dict={},
         needs_keys=True,
         needs_auth=False,
+        priority=RequestPriority.VEHICLE_STATUS,
     ):
         return await self.__api_request_retry(
-            method, uri, query_dict, body_dict, needs_keys, needs_auth, num_retries=0
+            method, uri, query_dict, body_dict, needs_keys, needs_auth, num_retries=0, priority=priority
         )
 
     async def __api_request_retry(
@@ -267,6 +273,7 @@ class Connection:
         needs_keys=True,
         needs_auth=False,
         num_retries=0,
+        priority=RequestPriority.VEHICLE_STATUS,
     ):
         if num_retries > MAX_RETRIES:
             self.logger.error("Request to %s exceeded max retries (%d). Giving up.", uri, MAX_RETRIES)
@@ -291,12 +298,36 @@ class Connection:
         else:
             self.logger.debug(
                 f"Sending {method} request to {uri}{retry_message}"  # noqa: G004
-            )  # noqa: G004
+            )
 
+        # Get operation name for lock tracking
+        operation_name = uri
+        if "getHealthReport" in uri:
+            operation_name = "health_report"
+        elif "getVecBaseInfos" in uri:
+            operation_name = "vehicle_status"
+        elif "getNickName" in uri:
+            operation_name = "nickname"
+        elif "doorUnlock" in uri or "doorLock" in uri or "engineStart" in uri or "engineStop" in uri:
+            operation_name = "user_command"
+
+        # Acquire the priority lock before making the request
+        lock_acquired = False
         try:
-            return await self.__send_api_request(
+            await priority_lock.acquire(priority, operation_name)
+            lock_acquired = True
+            
+            response = await self.__send_api_request(
                 method, uri, query_dict, body_dict, needs_keys, needs_auth
             )
+            
+            # Success! Release the lock before returning
+            if lock_acquired:
+                priority_lock.release()
+                lock_acquired = False
+                
+            return response
+            
         except (ClientError, OSError, asyncio.TimeoutError) as e:
             error_details = str(e) if str(e) else type(e).__name__
             retry_after = min(5 * (num_retries + 1), 30)  # Progressive backoff, max 30 seconds
@@ -321,6 +352,11 @@ class Connection:
             if num_retries >= 5:
                 retry_after = min(retry_after + 10, 60)  # Add extra delay after many retries, cap at 60s
                 
+            # Release the priority lock before waiting
+            if lock_acquired:
+                priority_lock.release()
+                lock_acquired = False
+            
             await asyncio.sleep(retry_after)
             
             # Limit maximum retries to prevent infinite loops
@@ -333,6 +369,7 @@ class Connection:
             if num_retries >= 6:
                 await self._recover_session()
                 
+            # Recursive call WITHOUT the lock still acquired
             return await self.__api_request_retry(
                 method,
                 uri,
@@ -341,15 +378,38 @@ class Connection:
                 needs_keys,
                 needs_auth,
                 num_retries + 1,
+                priority=priority,
             )
-        except ClientResponseError as e:
-            self.logger.error(f"Request to {uri} failed with status {e.status}: {e.message}")
-            raise  # Re-raise for the retry mechanism to handle
-        except MazdaAPIEncryptionException:
-            self.logger.info(
-                "Server reports request was not encrypted properly. Retrieving new encryption keys."
-            )
-            await self.__retrieve_keys()
+        except (ClientResponseError, MazdaAPIEncryptionException, MazdaTokenExpiredException, 
+                MazdaLoginFailedException, MazdaRequestInProgressException) as e:
+            # Release the priority lock before handling the exception
+            if lock_acquired:
+                priority_lock.release()
+                lock_acquired = False
+            
+            if isinstance(e, ClientResponseError):
+                self.logger.error(f"Request to {uri} failed with status {e.status}: {e.message}")
+                raise  # Re-raise for the retry mechanism to handle
+            elif isinstance(e, MazdaAPIEncryptionException):
+                self.logger.info(
+                    "Server reports request was not encrypted properly. Retrieving new encryption keys."
+                )
+                await self.__retrieve_keys()
+            elif isinstance(e, MazdaTokenExpiredException):
+                self.logger.info(
+                    "Server reports access token was expired. Fetching a new one."
+                )
+                await self.login(priority=priority)
+            elif isinstance(e, MazdaLoginFailedException):
+                self.logger.warning("Login failed for an unknown reason. Trying again.")
+                await self.login(priority=priority)
+            elif isinstance(e, MazdaRequestInProgressException):
+                self.logger.info(
+                    "Request failed because another request was already in progress. Waiting 30 seconds and trying again."
+                )
+                await asyncio.sleep(30)
+                
+            # Recursive call WITHOUT the lock still acquired
             return await self.__api_request_retry(
                 method,
                 uri,
@@ -358,47 +418,27 @@ class Connection:
                 needs_keys,
                 needs_auth,
                 num_retries + 1,
+                priority=priority,
             )
-        except MazdaTokenExpiredException:
-            self.logger.info(
-                "Server reports access token was expired. Retrieving new access token."
-            )
-            await self.login()
-            return await self.__api_request_retry(
-                method,
-                uri,
-                query_dict,
-                body_dict,
-                needs_keys,
-                needs_auth,
-                num_retries + 1,
-            )
-        except MazdaLoginFailedException:
-            self.logger.warning("Login failed for an unknown reason. Trying again.")
-            await self.login()
-            return await self.__api_request_retry(
-                method,
-                uri,
-                query_dict,
-                body_dict,
-                needs_keys,
-                needs_auth,
-                num_retries + 1,
-            )
-        except MazdaRequestInProgressException:
-            self.logger.info(
-                "Request failed because another request was already in progress. Waiting 30 seconds and trying again."
-            )
-            await asyncio.sleep(30)
-            return await self.__api_request_retry(
-                method,
-                uri,
-                query_dict,
-                body_dict,
-                needs_keys,
-                needs_auth,
-                num_retries + 1,
-            )
+        except asyncio.CancelledError:
+            # Handle cancellation by properly releasing the lock
+            self.logger.warning(f"Operation {operation_name} was cancelled")
+            if lock_acquired:
+                priority_lock.release()
+                lock_acquired = False
+            raise
+        except Exception as e:
+            # Release the priority lock for any other exceptions
+            self.logger.error(f"Unexpected error in API request: {str(e)}")
+            if lock_acquired:
+                priority_lock.release()
+                lock_acquired = False
+            raise
+        finally:
+            # Release the priority lock if we haven't already released it
+            if lock_acquired and priority_lock.current_operation == operation_name:
+                self.logger.debug(f"Finally block: releasing lock for {operation_name}")
+                priority_lock.release()
 
     async def __send_api_request(
         self,
@@ -562,71 +602,80 @@ class Connection:
         self.enc_key = response["encKey"]
         self.sign_key = response["signKey"]
 
-    async def login(self):  # noqa: D102
-        self.logger.info("Logging in as " + self.email)  # noqa: G003
-        self.logger.info("Retrieving public key to encrypt password")
-        encryption_key_response = await self._session.request(
-            "GET",
-            self.usher_url + "system/encryptionKey",
-            params={
-                "appId": "MazdaApp",
-                "locale": "en-US",
-                "deviceId": self.usher_api_device_id,
-                "sdkVersion": USHER_SDK_VERSION,
-            },
-            headers={"User-Agent": USER_AGENT_USHER_API},
-            ssl=ssl_context,
-        )
-
-        encryption_key_response_json = await encryption_key_response.json()
-
-        public_key = encryption_key_response_json["data"]["publicKey"]
-        encrypted_password = self.__encrypt_payload_with_public_key(
-            self.password, public_key
-        )
-        version_prefix = encryption_key_response_json["data"]["versionPrefix"]
-
-        self.logger.info("Sending login request")
-        login_response = await self._session.request(
-            "POST",
-            self.usher_url + "user/login",
-            headers={"User-Agent": USER_AGENT_USHER_API},
-            json={
-                "appId": "MazdaApp",
-                "deviceId": self.usher_api_device_id,
-                "locale": "en-US",
-                "password": version_prefix + encrypted_password,
-                "sdkVersion": USHER_SDK_VERSION,
-                "userId": self.email,
-                "userIdType": "email",
-            },
-            ssl=ssl_context,
-        )
-
-        login_response_json = await login_response.json()
-
-        if login_response_json.get("status") == "INVALID_CREDENTIAL":
-            self.logger.error("Login failed due to invalid email or password")
-            raise MazdaAuthenticationException("Invalid email or password")
-        if login_response_json.get("status") == "USER_LOCKED":
-            self.logger.error("Login failed to account being locked")
-            raise MazdaAccountLockedException("Account is locked")
-        if login_response_json.get("status") != "OK":
-            self.logger.error(
-                "Login failed"  # noqa: G003
-                + (
-                    (": " + login_response_json.get("status", ""))
-                    if ("status" in login_response_json)
-                    else ""
-                )
+    async def login(self, priority=RequestPriority.HEALTH_REPORT):  # noqa: D102
+        """Login to the Mazda API."""
+        try:
+            # Acquire the lock first
+            await priority_lock.acquire(priority, "login")
+            
+            self.logger.info("Logging in as " + self.email)  # noqa: G003
+            self.logger.info("Retrieving public key to encrypt password")
+            encryption_key_response = await self._session.request(
+                "GET",
+                self.usher_url + "system/encryptionKey",
+                params={
+                    "appId": "MazdaApp",
+                    "locale": "en-US",
+                    "deviceId": self.usher_api_device_id,
+                    "sdkVersion": USHER_SDK_VERSION,
+                },
+                headers={"User-Agent": USER_AGENT_USHER_API},
+                ssl=ssl_context,
             )
-            raise MazdaLoginFailedException("Login failed")
 
-        self.logger.info("Successfully logged in as " + self.email)  # noqa: G003
-        self.access_token = login_response_json["data"]["accessToken"]
-        self.access_token_expiration_ts = login_response_json["data"][
-            "accessTokenExpirationTs"
-        ]
+            encryption_key_response_json = await encryption_key_response.json()
+
+            public_key = encryption_key_response_json["data"]["publicKey"]
+            encrypted_password = self.__encrypt_payload_with_public_key(
+                self.password, public_key
+            )
+            version_prefix = encryption_key_response_json["data"]["versionPrefix"]
+
+            self.logger.info("Sending login request")
+            login_response = await self._session.request(
+                "POST",
+                self.usher_url + "user/login",
+                headers={"User-Agent": USER_AGENT_USHER_API},
+                json={
+                    "appId": "MazdaApp",
+                    "deviceId": self.usher_api_device_id,
+                    "locale": "en-US",
+                    "password": version_prefix + encrypted_password,
+                    "sdkVersion": USHER_SDK_VERSION,
+                    "userId": self.email,
+                    "userIdType": "email",
+                },
+                ssl=ssl_context,
+            )
+
+            login_response_json = await login_response.json()
+
+            if login_response_json.get("status") == "INVALID_CREDENTIAL":
+                self.logger.error("Login failed due to invalid email or password")
+                raise MazdaAuthenticationException("Invalid email or password")
+            if login_response_json.get("status") == "USER_LOCKED":
+                self.logger.error("Login failed to account being locked")
+                raise MazdaAccountLockedException("Account is locked")
+            if login_response_json.get("status") != "OK":
+                self.logger.error(
+                    "Login failed"  # noqa: G003
+                    + (
+                        (": " + login_response_json.get("status", ""))
+                        if ("status" in login_response_json)
+                        else ""
+                    )
+                )
+                raise MazdaLoginFailedException("Login failed")
+
+            self.logger.info("Successfully logged in as " + self.email)  # noqa: G003
+            self.access_token = login_response_json["data"]["accessToken"]
+            self.access_token_expiration_ts = login_response_json["data"][
+                "accessTokenExpirationTs"
+            ]
+        finally:
+            # Always release the lock, even if there's an exception
+            if priority_lock.current_operation == "login":
+                priority_lock.release()
 
     async def close(self):  # noqa: D102
         await self._session.close()
