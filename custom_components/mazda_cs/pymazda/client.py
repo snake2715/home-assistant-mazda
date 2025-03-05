@@ -152,7 +152,11 @@ class Client:  # noqa: D101
                         "Retry %d/%d in %.2f seconds", 
                         str(e), retry_count, max_retries, wait_time
                     )
-                    await asyncio.sleep(wait_time)
+                    try:
+                        await asyncio.sleep(wait_time)
+                    except asyncio.CancelledError:
+                        _LOGGER.debug("Sleep during retry backoff was cancelled, continuing with vehicle list retrieval")
+                        # Continue with operation
             
             if retry_count >= max_retries:
                 raise MazdaException(f"Failed to get vehicle list after {max_retries} attempts: {last_error}")
@@ -196,7 +200,12 @@ class Client:  # noqa: D101
                                     )
                                     nickname = ""  # Use empty string as fallback
                                 else:
-                                    await asyncio.sleep(1)  # Short delay before retry
+                                    try:
+                                        await asyncio.sleep(1)  # Short delay before retry
+                                    except asyncio.CancelledError:
+                                        _LOGGER.debug("Sleep during nickname retry was cancelled, continuing with empty nickname")
+                                        nickname = ""  # Use empty string if sleep is cancelled
+                                        break
                     except MazdaException as ex:
                         _LOGGER.warning("Error retrieving nickname for vehicle %s: %s", 
                                         current_vec_base_info.get("vin", "Unknown"), str(ex))
@@ -258,7 +267,11 @@ class Client:  # noqa: D101
             # Add delay between endpoint calls if configured
             if self._endpoint_delay > 0:
                 _LOGGER.debug("Sleeping for %d seconds between API endpoint calls", self._endpoint_delay)
-                await asyncio.sleep(self._endpoint_delay)
+                try:
+                    await asyncio.sleep(self._endpoint_delay)
+                except asyncio.CancelledError:
+                    _LOGGER.debug("Sleep between API calls was cancelled, proceeding with vehicles operation")
+                    # Don't re-raise, continue with the operation
                 
             return vehicles
             
@@ -482,7 +495,11 @@ class Client:  # noqa: D101
             # Add delay between endpoint calls if configured
             if self._endpoint_delay > 0:
                 _LOGGER.debug("Sleeping for %d seconds between API endpoint calls", self._endpoint_delay)
-                await asyncio.sleep(self._endpoint_delay)
+                try:
+                    await asyncio.sleep(self._endpoint_delay)
+                except asyncio.CancelledError:
+                    _LOGGER.debug("Sleep between API calls was cancelled, proceeding with vehicle status request")
+                    # Don't re-raise, continue with the operation
                 
             return vehicle_status
             
@@ -530,7 +547,11 @@ class Client:  # noqa: D101
             # Add delay between endpoint calls if configured
             if self._endpoint_delay > 0:
                 _LOGGER.debug("Sleeping for %d seconds between API endpoint calls", self._endpoint_delay)
-                await asyncio.sleep(self._endpoint_delay)
+                try:
+                    await asyncio.sleep(self._endpoint_delay)
+                except asyncio.CancelledError:
+                    _LOGGER.debug("Sleep between API calls was cancelled, proceeding with health report operation")
+                    # Don't re-raise, continue with the operation
                 
             return response
             
