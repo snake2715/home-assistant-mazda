@@ -30,7 +30,7 @@ from .exceptions import (
 )
 from .sensordata.sensor_data_builder import SensorDataBuilder
 from .ssl_context_configurator.ssl_context_configurator import SSLContextConfigurator
-from ..priority_lock import priority_lock, RequestPriority
+from ..priority_lock import get_account_lock, RequestPriority
 
 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ssl_context.load_default_certs()
@@ -129,6 +129,8 @@ class Connection:
             self._session = websession
 
         self.logger = logging.getLogger(__name__)
+
+        self.account_lock = get_account_lock(email)
 
     def _create_session(self):
         """Create a new aiohttp session with appropriate headers"""
@@ -314,7 +316,7 @@ class Connection:
         # Acquire the priority lock before making the request
         lock_acquired = False
         try:
-            await priority_lock.acquire(priority, operation_name)
+            await self.account_lock.acquire(priority, operation_name)
             lock_acquired = True
             
             response = await self.__send_api_request(
@@ -323,7 +325,7 @@ class Connection:
             
             # Success! Release the lock before returning
             if lock_acquired:
-                priority_lock.release()
+                self.account_lock.release()
                 lock_acquired = False
                 
             return response
@@ -354,7 +356,7 @@ class Connection:
                 
             # Release the priority lock before waiting
             if lock_acquired:
-                priority_lock.release()
+                self.account_lock.release()
                 lock_acquired = False
             
             await asyncio.sleep(retry_after)
@@ -384,7 +386,7 @@ class Connection:
                 MazdaLoginFailedException, MazdaRequestInProgressException) as e:
             # Release the priority lock before handling the exception
             if lock_acquired:
-                priority_lock.release()
+                self.account_lock.release()
                 lock_acquired = False
             
             if isinstance(e, ClientResponseError):
@@ -424,21 +426,21 @@ class Connection:
             # Handle cancellation by properly releasing the lock
             self.logger.warning(f"Operation {operation_name} was cancelled")
             if lock_acquired:
-                priority_lock.release()
+                self.account_lock.release()
                 lock_acquired = False
             raise
         except Exception as e:
             # Release the priority lock for any other exceptions
             self.logger.error(f"Unexpected error in API request: {str(e)}")
             if lock_acquired:
-                priority_lock.release()
+                self.account_lock.release()
                 lock_acquired = False
             raise
         finally:
             # Release the priority lock if we haven't already released it
-            if lock_acquired and priority_lock.current_operation == operation_name:
+            if lock_acquired and self.account_lock.current_operation == operation_name:
                 self.logger.debug(f"Finally block: releasing lock for {operation_name}")
-                priority_lock.release()
+                self.account_lock.release()
 
     async def __send_api_request(
         self,
@@ -606,7 +608,7 @@ class Connection:
         """Login to the Mazda API."""
         try:
             # Acquire the lock first
-            await priority_lock.acquire(priority, "login")
+            await self.account_lock.acquire(priority, "login")
             
             self.logger.info("Logging in as " + self.email)  # noqa: G003
             self.logger.info("Retrieving public key to encrypt password")
@@ -674,8 +676,8 @@ class Connection:
             ]
         finally:
             # Always release the lock, even if there's an exception
-            if priority_lock.current_operation == "login":
-                priority_lock.release()
+            if self.account_lock.current_operation == "login":
+                self.account_lock.release()
 
     async def close(self):  # noqa: D102
         await self._session.close()
