@@ -39,14 +39,15 @@ ssl_context.set_ciphers(
 )
 
 SSL_SIGNATURE_ALGORITHMS = [
-    "ecdsa_secp256r1_sha256",
-    "ecdsa_secp384r1_sha384",
-    "rsa_pss_rsae_sha256",
-    "rsa_pss_rsae_sha384",
-    "rsa_pss_rsae_sha512",
+    # Try to mimic Python 3.12's default ordering
     "rsa_pkcs1_sha256",
+    "ecdsa_secp256r1_sha256",
+    "rsa_pss_rsae_sha256",
     "rsa_pkcs1_sha384",
+    "ecdsa_secp384r1_sha384",
+    "rsa_pss_rsae_sha384",
     "rsa_pkcs1_sha512",
+    "rsa_pss_rsae_sha512"
 ]
 
 with SSLContextConfigurator(ssl_context, libssl_path="libssl.so.3") as ssl_context_configurator:
