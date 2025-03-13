@@ -368,7 +368,7 @@ class MazdaVehicleUpdateCoordinator(DataUpdateCoordinator):
                         # Try to get basic information even if status call failed
                         try:
                             basic_info = await with_advanced_timeout(
-                                lambda: self.client.get_vehicle_status(vehicle["id"]),
+                                lambda: self.client.get_vehicle_basic_info(vehicle["id"]),
                                 timeout_seconds=30,
                                 retry_config=retry_config,
                             )
@@ -513,7 +513,7 @@ class MazdaHealthUpdateCoordinator(DataUpdateCoordinator):
                 try:
                     vin = vehicle.get("vin", "unknown")
                     vehicle_id = vehicle.get("id", "unknown")
-                    model = f"{vehicle.get('modelYear', '')} {vehicle.get('carlineName', '')}"
+                    model = vehicle.get("model", "unknown")
                     
                     # Try to get nickname from cache first
                     nickname = vehicle.get("nickname")
