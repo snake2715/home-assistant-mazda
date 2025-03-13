@@ -55,27 +55,6 @@ ssl_context.set_ciphers(':'.join(cipher))
 
 SSL_SIGNATURE_ALGORITHMS = [
     "ecdsa_secp256r1_sha256",
-<<<<<<< HEAD
-=======
-    "ecdsa_secp384r1_sha384",
-    "ecdsa_secp521r1_sha512",
-    "ed25519",
-    "ed448",
-# Disable following algorithms as they doesn't seem to be supported by the API currently
-# and are sent by libssl by default. This workaround may not be needed (or work) in future.
-#    "ecdsa_brainpoolP256r1_sha256",
-#    "ecdsa_brainpoolP384r1_sha384",
-#    "ecdsa_brainpoolP512r1_sha512",
-    "rsa_pss_pss_sha256",
-    "rsa_pss_pss_sha384",
-    "rsa_pss_pss_sha512",
-<<<<<<< HEAD
-<<<<<<< HEAD
->>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
-=======
->>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
-=======
->>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
     "rsa_pss_rsae_sha256",
     "rsa_pkcs1_sha256",
     "ecdsa_secp384r1_sha384",
@@ -83,28 +62,7 @@ SSL_SIGNATURE_ALGORITHMS = [
     "rsa_pkcs1_sha384",
     "rsa_pss_rsae_sha512",
     "rsa_pkcs1_sha512",
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
     "rsa_pkcs1_sha1",
-=======
-=======
->>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
-=======
->>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
-    "ECDSA+SHA224",
-    "rsa_pkcs1_sha224",
-    "DSA+SHA224",
-    "DSA+SHA256",
-    "DSA+SHA384",
-    "DSA+SHA512",
-<<<<<<< HEAD
-<<<<<<< HEAD
->>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
-=======
->>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
-=======
->>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
 ]
 with SSLContextConfigurator(ssl_context, libssl_path="libssl.so.3") as ssl_context_configurator:
     ssl_context_configurator.configure_signature_algorithms(":".join(SSL_SIGNATURE_ALGORITHMS))
