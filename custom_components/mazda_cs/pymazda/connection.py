@@ -70,6 +70,9 @@ SSL_SIGNATURE_ALGORITHMS = [
     "rsa_pss_pss_sha384",
     "rsa_pss_pss_sha512",
 <<<<<<< HEAD
+<<<<<<< HEAD
+>>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
+=======
 >>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
 =======
 >>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
@@ -82,8 +85,11 @@ SSL_SIGNATURE_ALGORITHMS = [
     "rsa_pkcs1_sha512",
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
     "rsa_pkcs1_sha1",
 =======
+=======
+>>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
 =======
 >>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
     "ECDSA+SHA224",
@@ -93,6 +99,9 @@ SSL_SIGNATURE_ALGORITHMS = [
     "DSA+SHA384",
     "DSA+SHA512",
 <<<<<<< HEAD
+<<<<<<< HEAD
+>>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
+=======
 >>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
 =======
 >>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
