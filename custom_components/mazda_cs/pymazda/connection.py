@@ -69,6 +69,9 @@ SSL_SIGNATURE_ALGORITHMS = [
     "rsa_pss_pss_sha256",
     "rsa_pss_pss_sha384",
     "rsa_pss_pss_sha512",
+<<<<<<< HEAD
+>>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
+=======
 >>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
     "rsa_pss_rsae_sha256",
     "rsa_pkcs1_sha256",
@@ -78,14 +81,20 @@ SSL_SIGNATURE_ALGORITHMS = [
     "rsa_pss_rsae_sha512",
     "rsa_pkcs1_sha512",
 <<<<<<< HEAD
+<<<<<<< HEAD
     "rsa_pkcs1_sha1",
 =======
+=======
+>>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
     "ECDSA+SHA224",
     "rsa_pkcs1_sha224",
     "DSA+SHA224",
     "DSA+SHA256",
     "DSA+SHA384",
     "DSA+SHA512",
+<<<<<<< HEAD
+>>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
+=======
 >>>>>>> parent of 39600b6 (limit SSL signature algorithms to those supported by Mazda servers)
 ]
 with SSLContextConfigurator(ssl_context, libssl_path="libssl.so.3") as ssl_context_configurator:
