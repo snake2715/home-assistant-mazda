@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import logging
+import random
 import ssl
 import time
 from urllib.parse import urlencode
@@ -124,9 +125,28 @@ class Connection:
             except (AttributeError, OSError) as e:
                 self.logger.debug(f"Error closing previous session: {e}")
                 pass
-                
-        # Create new session with default headers
+        
+        # Create optimized TCP connector with connection pooling
+        connector = aiohttp.TCPConnector(
+            ssl=ssl_context,
+            limit=5,  # Connection pool limit
+            enable_cleanup_closed=True,
+            keepalive_timeout=60,  # Keep connections alive longer
+            ttl_dns_cache=300  # Cache DNS results for 5 minutes
+        )
+        
+        # Create timeout profile with reasonable defaults
+        timeout = ClientTimeout(
+            total=60,       # Total timeout 
+            connect=10,     # Connection timeout
+            sock_connect=10, # Socket connect timeout
+            sock_read=30    # Socket read timeout
+        )
+        
+        # Create new session with default headers and optimized settings
         self._session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
             headers={
                 "device-id": self.base_api_device_id,
                 "app-code": self.app_code,
@@ -135,7 +155,7 @@ class Connection:
                 "app-unique-id": APP_PACKAGE_ID,
             }
         )
-        self.logger.debug("Created new aiohttp session")
+        self.logger.debug("Created new optimized aiohttp session with connection pooling")
 
     async def _recover_session(self):
         """Recover from connection issues by recreating the session and logging in again"""
@@ -315,7 +335,6 @@ class Connection:
             
         except (ClientError, OSError, asyncio.TimeoutError) as e:
             error_details = str(e) if str(e) else type(e).__name__
-            retry_after = min(5 * (num_retries + 1), 30)  # Progressive backoff, max 30 seconds
             
             # Log connection errors with better error details
             if "getVecBaseInfos" in uri and num_retries > 5:
@@ -326,23 +345,20 @@ class Connection:
                 )
             else:
                 self.logger.warning(
-                    f"Server connection error: {error_details}. Waiting {retry_after} seconds before retry."
+                    f"Server connection error: {error_details}. Will retry."
                 )
                 
             # For server disconnections, log the error
             if "disconnected" in str(e).lower():
                 self.logger.error(f"Connection error during API request to {uri}: Server disconnected")
                 
-            # If we've already tried many times, add more delay to prevent excessive retries
-            if num_retries >= 5:
-                retry_after = min(retry_after + 10, 60)  # Add extra delay after many retries, cap at 60s
-                
             # Release the priority lock before waiting
             if lock_acquired:
                 self.account_lock.release()
                 lock_acquired = False
             
-            await asyncio.sleep(retry_after)
+            # Use smart retry backoff for connection errors
+            await self.__smart_retry_backoff(num_retries, error_type=e, uri=uri)
             
             # Limit maximum retries to prevent infinite loops
             max_retries = 12  # Approximately 5-10 minutes of retrying with progressive backoff
@@ -365,6 +381,13 @@ class Connection:
                 num_retries + 1,
                 priority=priority,
             )
+        except asyncio.CancelledError:
+            # Handle cancellation by properly releasing the lock
+            self.logger.warning(f"Operation {operation_name} was cancelled")
+            if lock_acquired:
+                self.account_lock.release()
+                lock_acquired = False
+            raise
         except (ClientResponseError, MazdaAPIEncryptionException, MazdaTokenExpiredException, 
                 MazdaLoginFailedException, MazdaRequestInProgressException) as e:
             # Release the priority lock before handling the exception
@@ -374,7 +397,10 @@ class Connection:
             
             if isinstance(e, ClientResponseError):
                 self.logger.error(f"Request to {uri} failed with status {e.status}: {e.message}")
-                raise  # Re-raise for the retry mechanism to handle
+                
+                # Use smart retry backoff for HTTP errors
+                await self.__smart_retry_backoff(num_retries, error_type=e, uri=uri)
+                
             elif isinstance(e, MazdaAPIEncryptionException):
                 self.logger.info(
                     "Server reports request was not encrypted properly. Retrieving new encryption keys."
@@ -390,9 +416,10 @@ class Connection:
                 await self.login(priority=priority)
             elif isinstance(e, MazdaRequestInProgressException):
                 self.logger.info(
-                    "Request failed because another request was already in progress. Waiting 30 seconds and trying again."
+                    "Request failed because another request was already in progress. Waiting and trying again."
                 )
-                await asyncio.sleep(30)
+                # Use special backoff for request-in-progress errors
+                await self.__smart_retry_backoff(num_retries, error_type=e, uri=uri)
                 
             # Recursive call WITHOUT the lock still acquired
             return await self.__api_request_retry(
@@ -405,13 +432,6 @@ class Connection:
                 num_retries + 1,
                 priority=priority,
             )
-        except asyncio.CancelledError:
-            # Handle cancellation by properly releasing the lock
-            self.logger.warning(f"Operation {operation_name} was cancelled")
-            if lock_acquired:
-                self.account_lock.release()
-                lock_acquired = False
-            raise
         except Exception as e:
             # Release the priority lock for any other exceptions
             self.logger.error(f"Unexpected error in API request: {str(e)}")
@@ -664,3 +684,152 @@ class Connection:
 
     async def close(self):  # noqa: D102
         await self._session.close()
+
+    async def execute_with_minimal_lock_time(self, operation_func, priority, operation_name):
+        """Execute an operation with minimal lock hold time.
+        
+        Args:
+            operation_func: Async function to execute while holding the lock
+            priority: RequestPriority level for this operation
+            operation_name: Name of operation for logging
+            
+        Returns:
+            Result from the operation_func
+        """
+        lock_acquired = False
+        try:
+            # Acquire lock for initial operation
+            await self.account_lock.acquire(priority, operation_name)
+            lock_acquired = True
+            
+            # Execute the critical section that needs serialized access
+            result = await operation_func()
+            
+            # Release lock immediately after critical section
+            if lock_acquired:
+                self.account_lock.release()
+                lock_acquired = False
+            
+            return result
+        except Exception as e:
+            # Ensure lock is released on any exception
+            if lock_acquired and self.account_lock.current_operation == operation_name:
+                self.logger.debug(f"Releasing lock in exception handler for {operation_name}")
+                self.account_lock.release()
+                lock_acquired = False
+            raise
+        finally:
+            # Double-check lock is released in finally block
+            if lock_acquired and self.account_lock.current_operation == operation_name:
+                self.logger.debug(f"Finally block: releasing lock for {operation_name}")
+                self.account_lock.release()
+
+    async def execute_sequential_batch(self, requests, priority=RequestPriority.VEHICLE_STATUS):
+        """Execute a batch of requests in sequence with optimized locking.
+        
+        Args:
+            requests: List of (method, uri, query_dict, body_dict, needs_keys, needs_auth)
+            priority: RequestPriority level
+            
+        Returns:
+            List of results from each request in order
+        """
+        results = []
+        operation_name = "batch_operation"
+        
+        # Single lock acquisition for the batch
+        lock_acquired = False
+        try:
+            await self.account_lock.acquire(priority, operation_name)
+            lock_acquired = True
+            
+            for req_data in requests:
+                method, uri, query_dict, body_dict, needs_keys, needs_auth = req_data
+                
+                # Pre-check auth/keys outside the critical path
+                if needs_keys and (self.enc_key is None or self.sign_key is None):
+                    # Release lock during key retrieval
+                    if lock_acquired:
+                        self.account_lock.release()
+                        lock_acquired = False
+                    
+                    await self.__retrieve_keys()
+                    
+                    # Re-acquire lock
+                    await self.account_lock.acquire(priority, operation_name)
+                    lock_acquired = True
+                    
+                if needs_auth and (self.access_token is None or 
+                                  self.access_token_expiration_ts is None or
+                                  self.access_token_expiration_ts <= time.time()):
+                    # Release lock during auth
+                    if lock_acquired:
+                        self.account_lock.release()
+                        lock_acquired = False
+                    
+                    await self.login(priority=priority)
+                    
+                    # Re-acquire lock
+                    await self.account_lock.acquire(priority, operation_name)
+                    lock_acquired = True
+                
+                # Make the actual request
+                result = await self.__send_api_request(
+                    method, uri, query_dict, body_dict, needs_keys, needs_auth
+                )
+                results.append(result)
+                
+                # Small pause between requests (if needed)
+                await asyncio.sleep(0.1)
+                
+            return results
+        except Exception as e:
+            self.logger.error(f"Error during sequential batch: {str(e)}")
+            raise
+        finally:
+            # Always release the lock
+            if lock_acquired and self.account_lock.current_operation == operation_name:
+                self.account_lock.release()
+
+    async def __smart_retry_backoff(self, retry_count, error_type=None, uri=None):
+        """Calculate optimized backoff time with jitter based on the error type.
+        
+        Args:
+            retry_count: Current retry attempt number (0-based)
+            error_type: Type of error that caused the retry
+            uri: URI being requested (for logging)
+        """
+        # Base delay (100ms × 2^retry) with limit
+        base_delay = min(0.1 * (2 ** retry_count), 30)
+        
+        # Special case handling based on error type
+        if isinstance(error_type, ClientResponseError):
+            # Adjust backoff based on HTTP status code
+            if error_type.status == 429:  # Too Many Requests
+                base_delay = min(10 + (retry_count * 5), 60)  # Progressive backoff for rate limiting
+            elif error_type.status >= 500:  # Server errors
+                base_delay = min(5 + (retry_count * 2), 45)  # Progressive backoff for server errors
+            else:  # Other client errors
+                base_delay = min(1 + (retry_count * 1), 15)  # Modest backoff for client errors
+        
+        elif isinstance(error_type, (ServerDisconnectedError, ClientConnectorError, ClientOSError)):
+            # Network connectivity issues
+            base_delay = min(2 + (2 ** retry_count) * 0.5, 60)  # More aggressive backoff
+            
+        elif isinstance(error_type, MazdaRequestInProgressException):
+            # Request-in-progress errors need longer delays
+            base_delay = min(20 + (retry_count * 10), 120)  # Progressive long backoff
+            
+        elif isinstance(error_type, asyncio.TimeoutError):
+            # Timeout errors
+            base_delay = min(5 + (retry_count * 3), 45)  # Progressive backoff for timeouts
+        
+        # Add jitter (±30%) to prevent thundering herd
+        jitter_factor = 0.3 * (2 * random.random() - 1)
+        delay = max(0.1, base_delay * (1 + jitter_factor))  # Ensure minimum 100ms delay
+        
+        error_type_name = error_type.__class__.__name__ if error_type else "Unknown"
+        
+        # Log and wait
+        self.logger.debug(f"Retry {retry_count+1} - waiting {delay:.2f}s before retrying {uri} (error: {error_type_name})")
+        await asyncio.sleep(delay)
