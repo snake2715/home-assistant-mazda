@@ -702,17 +702,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     # Force refresh coordinators to get initial data
-    # Force refresh coordinators to get initial data
-    try:
-        await coordinator.async_refresh()
-    except asyncio.CancelledError:
-        _LOGGER.warning("Initial vehicle refresh was cancelled, continuing with setup")
-        # Initialize with empty data if needed
-        coordinator.data = []
-    except Exception as ex:
-        _LOGGER.warning(f"Initial refresh error: {ex}, continuing with setup")
-        coordinator.data = []
-        
+    await coordinator.async_refresh()
     # Remove immediate health report refresh during initialization
     # await health_coordinator.async_refresh()
 
