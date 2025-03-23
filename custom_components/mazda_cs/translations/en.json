@@ -81,8 +81,14 @@
             "ev_charge_level": {
                 "name": "Charge level"
             },
+            "ev_remaining_charging_time": {
+                "name" : "Remaining charging time (AC)"
+            },
             "ev_remaining_range": {
                 "name": "Remaining range"
+            },
+            "ev_remaining_range_bev": {
+                "name": "Remaining range BEV"
             },
             "front_left_tire_pressure": {
                 "name": "Front left tire pressure"

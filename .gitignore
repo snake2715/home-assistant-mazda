@@ -1,0 +1,14 @@
+/custom_components/mazda_cs/__pycache__
+*.pyc
+custom_components/mazda_cs/logs.coffee
+custom_components/mazda_cs/MAZDA_API_DOCUMENTATION.md
+custom_components/mazda_cs/logs.coffee
+custom_components/mazda_cs/logs.coffee
+custom_components/mazda_cs/logs.coffee
+/custom_components/mazda_cs/logs
+custom_components/mazda_cs/logs.coffee
+custom_components/mazda_cs/PARAMETER_FIX.md
+custom_components/mazda_cs/FIXES_SUMMARY.md
+custom_components/mazda_cs/ERROR_FIX_SUMMARY.md
+custom_components/mazda_cs/TEST_SERVICE.md
+custom_components/mazda_cs/TESTING.md

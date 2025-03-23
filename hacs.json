@@ -1,8 +1,10 @@
 {
-  "name": "Mazda",
+  "name": "Mazda Connected Services",
+  "content_in_root": false,
   "render_readme": true,
   "country": "US",
-  "homeassistant": "2023.4.0",
-  "zip_release": true,
-  "filename": "mazda.zip"
+"homeassistant": "2024.8.0",
+  "domains": ["mazda_cs"],
+  "zip_release": false,
+  "category": "integration"
 }

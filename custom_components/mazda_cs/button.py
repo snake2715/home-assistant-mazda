@@ -100,9 +100,9 @@ BUTTON_ENTITIES = [
     MazdaButtonEntityDescription(
         key="refresh_vehicle_status",
         translation_key="refresh_vehicle_status",
-        icon="mdi:refresh",
+        icon="mdi:refresh-circle",
         async_press=handle_refresh_vehicle_status,
-        is_supported=lambda data: data["isElectric"],
+        is_supported=lambda data: True,
     ),
 ]
 
@@ -139,8 +139,8 @@ class MazdaButtonEntity(MazdaEntity, ButtonEntity):
         """Initialize Mazda button."""
         super().__init__(client, coordinator, index)
         self.entity_description = description
-
         self._attr_unique_id = f"{self.vin}_{description.key}"
+        self._attr_icon = description.icon
 
     async def async_press(self) -> None:
         """Press the button."""

@@ -85,6 +85,7 @@ class Client:  # noqa: D101
                     "exteriorColorName"
                 ),
                 "isElectric": current_vec_base_info.get("econnectType", 0) == 1,
+                "hasFuel": other_veh_info.get("CVServiceInformation", {}).get("fuelType", "00") != "05"
             }
 
             vehicles.append(vehicle)
@@ -170,6 +171,8 @@ class Client:  # noqa: D101
                     "RRTPrsDispPsi"
                 ),
             },
+            # Store the raw response for health data access
+            "raw_response": vehicle_status_response
         }
 
         door_lock_status = vehicle_status["doorLocks"]
@@ -191,61 +194,34 @@ class Client:  # noqa: D101
 
         return vehicle_status
 
+    async def get_health_reports(self, vehicle_id):  # noqa: D102
+        """Get health reports for a vehicle.
+        
+        Args:
+            vehicle_id: The vehicle ID
+            
+        Returns:
+            List of health reports for the vehicle
+        """
+        return await self.controller.get_health_reports(vehicle_id)
+
+    async def get_health_report(self, vehicle_id):  # noqa: D102
+        """Get health report for a vehicle.
+        
+        Args:
+            vehicle_id: The vehicle ID
+            
+        Returns:
+            Health report data for the vehicle
+        """
+        health_report_response = await self.controller.get_health_report(vehicle_id)
+        return health_report_response.get("healthReport", {})
+
     async def get_ev_vehicle_status(self, vehicle_id):  # noqa: D102
         ev_vehicle_status_response = await self.controller.get_ev_vehicle_status(
             vehicle_id
         )
-
-        result_data = ev_vehicle_status_response.get("resultData")[0]
-        vehicle_info = result_data.get("PlusBInformation", {}).get("VehicleInfo", {})
-        charge_info = vehicle_info.get("ChargeInfo", {})
-        hvac_info = vehicle_info.get("RemoteHvacInfo", {})
-
-        ev_vehicle_status = {
-            "lastUpdatedTimestamp": result_data.get("OccurrenceDate"),
-            "chargeInfo": {
-                "batteryLevelPercentage": charge_info.get("SmaphSOC"),
-                "drivingRangeKm": charge_info.get("SmaphRemDrvDistKm"),
-                "pluggedIn": charge_info.get("ChargerConnectorFitting") == 1,
-                "charging": charge_info.get("ChargeStatusSub") == 6,
-                "basicChargeTimeMinutes": charge_info.get("MaxChargeMinuteAC"),
-                "quickChargeTimeMinutes": charge_info.get("MaxChargeMinuteQBC"),
-                "batteryHeaterAuto": charge_info.get("CstmzStatBatHeatAutoSW") == 1,
-                "batteryHeaterOn": charge_info.get("BatteryHeaterON") == 1,
-            },
-            "hvacInfo": {
-                "hvacOn": hvac_info.get("HVAC") == 1,
-                "frontDefroster": hvac_info.get("FrontDefroster") == 1,
-                "rearDefroster": hvac_info.get("RearDefogger") == 1,
-                "interiorTemperatureCelsius": hvac_info.get("InCarTeDC"),
-            },
-        }
-
-        self.__save_api_value(
-            vehicle_id,
-            "hvac_mode",
-            ev_vehicle_status["hvacInfo"]["hvacOn"],
-            datetime.datetime.strptime(
-                ev_vehicle_status["lastUpdatedTimestamp"], "%Y%m%d%H%M%S"
-            ).replace(tzinfo=datetime.UTC),
-        )
-
-        return ev_vehicle_status
-
-    def get_assumed_lock_state(self, vehicle_id):  # noqa: D102
-        return self.__get_assumed_value(
-            vehicle_id, "lock_state", datetime.timedelta(seconds=600)
-        )
-
-    def get_assumed_hvac_mode(self, vehicle_id):  # noqa: D102
-        return self.__get_assumed_value(
-            vehicle_id, "hvac_mode", datetime.timedelta(seconds=600)
-        )
-
-    def get_assumed_hvac_setting(self, vehicle_id):  # noqa: D102
-        return self.__get_assumed_value(
-            vehicle_id, "hvac_setting", datetime.timedelta(seconds=600)
-        )
+        return ev_vehicle_status_response.get("evStatus")
 
     async def turn_on_hazard_lights(self, vehicle_id):  # noqa: D102
         await self.controller.light_on(vehicle_id)
@@ -332,6 +308,21 @@ class Client:  # noqa: D101
 
     async def close(self):  # noqa: D102
         await self.controller.close()
+
+    def get_assumed_lock_state(self, vehicle_id):  # noqa: D102
+        return self.__get_assumed_value(
+            vehicle_id, "lock_state", datetime.timedelta(seconds=600)
+        )
+
+    def get_assumed_hvac_mode(self, vehicle_id):  # noqa: D102
+        return self.__get_assumed_value(
+            vehicle_id, "hvac_mode", datetime.timedelta(seconds=600)
+        )
+
+    def get_assumed_hvac_setting(self, vehicle_id):  # noqa: D102
+        return self.__get_assumed_value(
+            vehicle_id, "hvac_setting", datetime.timedelta(seconds=600)
+        )
 
     def __get_assumed_value(self, vehicle_id, key, assumed_state_validity_duration):
         cached_state = self.__get_cached_state(vehicle_id)

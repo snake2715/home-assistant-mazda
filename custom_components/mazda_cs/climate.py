@@ -11,6 +11,7 @@ from homeassistant.components.climate import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_TEMPERATURE,
+    CONF_EMAIL,
     PRECISION_HALVES,
     PRECISION_WHOLE,
     UnitOfTemperature,
@@ -22,6 +23,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 from . import MazdaAPI as MazdaAPIClient, MazdaEntity
 from .const import DATA_CLIENT, DATA_COORDINATOR, DATA_REGION, DOMAIN
+from .api_lock import RequestPriority, get_account_lock
 
 PRESET_DEFROSTER_OFF = "Defroster Off"
 PRESET_DEFROSTER_FRONT = "Front Defroster"
@@ -53,9 +55,10 @@ async def async_setup_entry(
     client = entry_data[DATA_CLIENT]
     coordinator = entry_data[DATA_COORDINATOR]
     region = entry_data[DATA_REGION]
+    account_email = config_entry.data[CONF_EMAIL]
 
     async_add_entities(
-        MazdaClimateEntity(client, coordinator, index, region)
+        MazdaClimateEntity(client, coordinator, index, region, account_email)
         for index, data in enumerate(coordinator.data)
         if data["isElectric"]
     )
@@ -66,7 +69,7 @@ class MazdaClimateEntity(MazdaEntity, ClimateEntity):
 
     _attr_translation_key = "climate"
     _attr_supported_features = (
-        ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE | ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON
     )
     _attr_hvac_modes = [HVACMode.HEAT_COOL, HVACMode.OFF]
     _attr_preset_modes = [
@@ -82,11 +85,13 @@ class MazdaClimateEntity(MazdaEntity, ClimateEntity):
         coordinator: DataUpdateCoordinator,
         index: int,
         region: str,
+        account_email: str,
     ) -> None:
         """Initialize Mazda climate entity."""
         super().__init__(client, coordinator, index)
 
         self.region = region
+        self.account_email = account_email
         self._attr_unique_id = self.vin
 
         if self.data["hvacSetting"]["temperatureUnit"] == "F":
@@ -149,10 +154,18 @@ class MazdaClimateEntity(MazdaEntity, ClimateEntity):
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set a new HVAC mode."""
-        if hvac_mode == HVACMode.HEAT_COOL:
-            await self.client.turn_on_hvac(self.vehicle_id)
-        elif hvac_mode == HVACMode.OFF:
-            await self.client.turn_off_hvac(self.vehicle_id)
+        # Get the account lock
+        account_lock = get_account_lock(self.account_email)
+        
+        # Use the lock with COMMAND priority (highest)
+        async with account_lock.acquire_context(
+            RequestPriority.COMMAND,
+            f"hvac_mode_{self.vehicle_id}"
+        ):
+            if hvac_mode == HVACMode.HEAT_COOL:
+                await self.client.turn_on_hvac(self.vehicle_id)
+            elif hvac_mode == HVACMode.OFF:
+                await self.client.turn_off_hvac(self.vehicle_id)
 
         self._handle_coordinator_update()
 
@@ -161,25 +174,41 @@ class MazdaClimateEntity(MazdaEntity, ClimateEntity):
         if (temperature := kwargs.get(ATTR_TEMPERATURE)) is not None:
             precision = self.precision
             rounded_temperature = round(temperature / precision) * precision
-
-            await self.client.set_hvac_setting(
-                self.vehicle_id,
-                rounded_temperature,
-                self.data["hvacSetting"]["temperatureUnit"],
-                _front_defroster_enabled(self._attr_preset_mode),
-                _rear_defroster_enabled(self._attr_preset_mode),
-            )
+            
+            # Get the account lock
+            account_lock = get_account_lock(self.account_email)
+            
+            # Use the lock with COMMAND priority (highest)
+            async with account_lock.acquire_context(
+                RequestPriority.COMMAND,
+                f"set_temperature_{self.vehicle_id}"
+            ):
+                await self.client.set_hvac_setting(
+                    self.vehicle_id,
+                    rounded_temperature,
+                    self.data["hvacSetting"]["temperatureUnit"],
+                    _front_defroster_enabled(self._attr_preset_mode),
+                    _rear_defroster_enabled(self._attr_preset_mode),
+                )
 
             self._handle_coordinator_update()
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Turn on/off the front/rear defrosters according to the chosen preset mode."""
-        await self.client.set_hvac_setting(
-            self.vehicle_id,
-            self._attr_target_temperature,
-            self.data["hvacSetting"]["temperatureUnit"],
-            _front_defroster_enabled(preset_mode),
-            _rear_defroster_enabled(preset_mode),
-        )
+        # Get the account lock
+        account_lock = get_account_lock(self.account_email)
+        
+        # Use the lock with COMMAND priority (highest)
+        async with account_lock.acquire_context(
+            RequestPriority.COMMAND,
+            f"set_preset_mode_{self.vehicle_id}"
+        ):
+            await self.client.set_hvac_setting(
+                self.vehicle_id,
+                self._attr_target_temperature,
+                self.data["hvacSetting"]["temperatureUnit"],
+                _front_defroster_enabled(preset_mode),
+                _rear_defroster_enabled(preset_mode),
+            )
 
         self._handle_coordinator_update()
