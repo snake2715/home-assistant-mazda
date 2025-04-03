@@ -31,7 +31,7 @@ All Mazda vehicles with Mazda Connected Services capability should be compatible
 
 ### With HACS (Recommended)
 
-1. Add this repository as a custom repository in HACS
+1. Add `https://github.com/snake2715/home-assistant-mazda` as a custom repository in HACS
 2. Search for "Mazda Connected Services" in HACS and install it
 3. Restart Home Assistant
 
@@ -71,7 +71,7 @@ If you experience issues with the integration:
 
 ## Contributing
 
-Contributions to improve this integration are welcome. Please feel free to submit pull requests or report issues.
+Contributions to improve this integration are welcome. Please feel free to submit pull requests or report issues on our [GitHub repository](https://github.com/snake2715/home-assistant-mazda).
 
 ## Version Control & Updates
 
