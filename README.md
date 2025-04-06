@@ -8,6 +8,7 @@ This is an enhanced fork of the Mazda Connected Services integration for Home As
 - Improved support for newer Mazda vehicle models
 - Optimized performance with configurable update intervals
 - Added additional vehicle metrics and controls
+- Optimized health data fetching to eliminate duplicate API calls and prevent connection resets
 
 ## Features
 

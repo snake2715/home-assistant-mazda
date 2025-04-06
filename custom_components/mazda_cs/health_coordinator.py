@@ -18,12 +18,14 @@ class MazdaHealthUpdateCoordinator(DataUpdateCoordinator):
         self,
         hass: HomeAssistant,
         client: MazdaAPI,
+        vehicle_coordinator,  # Add this parameter
         vehicle_id: str,
         update_interval: int,
         account_email: str,
     ):
         """Initialize the health data update coordinator."""
         self.client = client
+        self.vehicle_coordinator = vehicle_coordinator  # Store it
         self.vehicle_id = vehicle_id
         self.account_email = account_email
         self.vehicle = None  # Will be populated during first update
@@ -64,9 +66,23 @@ class MazdaHealthUpdateCoordinator(DataUpdateCoordinator):
                     if not self.vehicle:
                         _LOGGER.warning("Vehicle %s not found, using vehicle_id only", self.vehicle_id)
                     
-                    # Get vehicle status (this contains all the health data we need)
-                    vehicle_status = await self.client.get_vehicle_status(self.vehicle_id)
-                    _LOGGER.debug("Got vehicle status for health data: %s", self.vehicle_id)
+                    # Get the data from the vehicle coordinator
+                    if not self.vehicle_coordinator.data:
+                        _LOGGER.warning("Vehicle coordinator has no data yet")
+                        return {"health_report": {}}
+
+                    # Find our vehicle in the data
+                    vehicle_data = None
+                    for vehicle in self.vehicle_coordinator.data:
+                        if vehicle.get("id") == self.vehicle_id:
+                            vehicle_data = vehicle
+                            break
+
+                    if not vehicle_data or "status" not in vehicle_data:
+                        _LOGGER.warning(f"Vehicle {self.vehicle_id} status not found in coordinator data")
+                        return {"health_report": {}}
+
+                    vehicle_status = vehicle_data["status"]
                     
                     # Debug the entire vehicle status response structure
                     _LOGGER.debug("Full vehicle status response structure: %s", list(vehicle_status.keys()))

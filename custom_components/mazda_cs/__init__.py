@@ -234,6 +234,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         health_coordinator = MazdaHealthUpdateCoordinator(
             hass,
             mazda_client,
+            coordinator,  # Pass the vehicle coordinator
             vehicle["id"],
             DEFAULT_VEHICLE_UPDATE_INTERVAL,  # Use the same update interval as vehicle status
             email,  # Pass the account email for lock management

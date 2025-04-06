@@ -6,6 +6,5 @@
   "documentation": "https://github.com/snake2715/home-assistant-mazda/",
   "issue_tracker": "https://github.com/snake2715/home-assistant-mazda/issues",
   "iot_class": "cloud_polling",
-  "version": "1.0.1",
-  "icon": "mdi:car"
+  "version": "1.0.3"
 }
